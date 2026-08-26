@@ -90,6 +90,141 @@ class Protocol(unittest.TestCase):
         self.assertNotEqual(r["result"]["protocolVersion"], "2099-01-01")
 
 
+class InputValidation(unittest.TestCase):
+    def test_as_int_defaults_and_bounds(self):
+        self.assertEqual(server._as_int(None, 10, "limit"), 10)
+        self.assertEqual(server._as_int("", 10, "limit"), 10)
+        self.assertEqual(server._as_int("7", 10, "limit"), 7)
+        self.assertEqual(server._as_int(7.0, 10, "limit"), 7)
+        with self.assertRaises(server.ToolError):
+            server._as_int("abc", 10, "limit")
+        with self.assertRaises(server.ToolError):
+            server._as_int(True, 10, "limit")
+        with self.assertRaises(server.ToolError):
+            server._as_int([1], 10, "limit")
+        with self.assertRaises(server.ToolError):
+            server._as_int(5, 10, "limit", minimum=6)
+        with self.assertRaises(server.ToolError):
+            server._as_int(50, 10, "limit", maximum=30)
+
+    def test_catalog_search_rejects_bad_limit(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_catalog_search({"query": "x", "limit": "abc"})
+        self.assertIn("limit", str(cm.exception))
+
+    def test_rooms_rejects_calendar_invalid_date(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_rooms({"date": "2026-02-30"})
+        self.assertIn("real calendar day", str(cm.exception))
+
+    def test_rooms_rejects_nonstring_date(self):
+        for bad in (20260801, ["2026-08-01"], b"2026-08-01"):
+            with self.assertRaises(server.ToolError):
+                server.tool_rooms({"date": bad})
+
+    def test_hours_bounds(self):
+        with self.assertRaises(server.ToolError):
+            server.tool_hours({"weeks": 0})
+        with self.assertRaises(server.ToolError):
+            server.tool_hours({"weeks": 9})
+
+    def test_digitalcommons_days_bounds(self):
+        with self.assertRaises(server.ToolError):
+            server.tool_digitalcommons({"days": -3})
+
+    def test_as_int_huge_and_fractional(self):
+        with self.assertRaises(server.ToolError):
+            server._as_int(10 ** 400, 10, "limit", maximum=30)
+        with self.assertRaises(server.ToolError):
+            server._as_int(7.5, 10, "limit")
+
+    def test_as_int_limits_require_positive(self):
+        with self.assertRaises(server.ToolError):
+            server.tool_catalog_search({"query": "x", "limit": -5})
+        with self.assertRaises(server.ToolError):
+            server.tool_journal_lookup({"query": "x", "limit": 0})
+        with self.assertRaises(server.ToolError):
+            server.tool_course_reserves({"query": "x", "limit": 0})
+
+    def test_as_bool_strict_parsing(self):
+        self.assertFalse(server._as_bool(None, "overwrite"))
+        self.assertFalse(server._as_bool("", "overwrite"))
+        self.assertFalse(server._as_bool("false", "overwrite"))
+        self.assertFalse(server._as_bool("0", "overwrite"))
+        self.assertFalse(server._as_bool("no", "overwrite"))
+        self.assertTrue(server._as_bool(True, "overwrite"))
+        self.assertTrue(server._as_bool(1, "overwrite"))
+        self.assertTrue(server._as_bool("true", "overwrite"))
+        with self.assertRaises(server.ToolError):
+            server._as_bool("maybe", "overwrite")
+        with self.assertRaises(server.ToolError):
+            server._as_bool(2, "overwrite")
+
+    def test_save_work_overwrite_string_false_not_truthy(self):
+        # regression: bool("false") was True; _as_bool must not repeat that
+        with mock.patch.object(server, "resolve_oa_pdf", return_value=(None, None)):
+            out = server.tool_save_work({"doi": "10.1234/x", "overwrite": "false"})
+        self.assertFalse(out["saved"])
+
+    def test_is_digitalcommons_exact_host(self):
+        self.assertTrue(server._is_digitalcommons(
+            "https://digitalcommons.andrews.edu/auss/vol56/iss1/6/"))
+        self.assertTrue(server._is_digitalcommons(
+            "https://lib.digitalcommons.andrews.edu/x"))
+        self.assertFalse(server._is_digitalcommons(
+            "http://digitalcommons.andrews.edu.127.0.0.1.nip.io/x"))
+        self.assertFalse(server._is_digitalcommons(
+            "http://digitalcommons.andrews.edu.evil.com/x"))
+        self.assertFalse(server._is_digitalcommons(
+            "http://notdigitalcommons.andrews.edu/x"))
+
+    def test_save_work_rejects_dc_bypass_hosts_before_network(self):
+        for u in ("http://digitalcommons.andrews.edu.127.0.0.1.nip.io/x",
+                  "http://digitalcommons.andrews.edu.evil.com/x"):
+            with mock.patch("urllib.request.urlopen",
+                            side_effect=AssertionError("network must not be called")):
+                with self.assertRaises(server.ToolError):
+                    server.tool_save_work({"url": u})
+
+    def test_save_work_doi_prefix_normalization(self):
+        for doi in ("https://doi.org/10.1234/abc", "http://dx.doi.org/10.1234/abc",
+                    "doi:10.1234/abc"):
+            with mock.patch.object(server, "resolve_oa_pdf",
+                                   return_value=(None, None)) as m:
+                server.tool_save_work({"doi": doi})
+            self.assertEqual(m.call_args[0][0], "10.1234/abc", doi)
+
+
+    def test_slim_instance_tolerates_publication_dict_and_string_contributors(self):
+        out = server.slim_instance({
+            "id": "i1", "title": "T",
+            "publication": {"dateOfPublication": "2020", "publisher": "P"},
+            "contributors": ["Plain String", {"name": "Doe, J."}],
+        })
+        self.assertEqual(out["published"], "2020")
+        self.assertEqual(out["contributors"], ["Doe, J."])
+
+    def test_http_uris_skips_non_dict_entries(self):
+        self.assertEqual(server._http_uris(
+            ["https://x.org/1", {"uri": "https://x.org/2"}, {"uri": "javascript:bad"},
+             {"uri": "https://x.org/2"}]), ["https://x.org/2"])
+
+    def test_first_pub_tolerates_shape_drift(self):
+        self.assertEqual(server._first_pub({"publication": []}), {})
+        self.assertEqual(server._first_pub({"publication": [{"publisher": "P"}]}),
+                         {"publisher": "P"})
+        self.assertEqual(server._first_pub({"publication": {"publisher": "P"}}),
+                         {"publisher": "P"})
+        self.assertEqual(server._first_pub({"publication": "weird"}), {})
+
+    def test_databases_query_uses_name_and_description_only(self):
+        with mock.patch.object(server, "load_databases", return_value=[
+                {"name": "ATLA", "description": "Religion & theology index.",
+                 "url": "https://x.org"}]):
+            out = server.tool_databases({"query": "theology"})
+            self.assertEqual(out["total"], 1)
+
+
 class OkapiAuth(unittest.TestCase):
     def setUp(self):
         server._okapi_token.update(value=None, obtained=0)
@@ -395,8 +530,9 @@ class SaveWork(unittest.TestCase):
         def fake_dl(url, **kw):
             captured["url"] = url
             return {"saved_to": "/tmp/x.pdf", "size_bytes": 10}
-        with mock.patch.object(server, "http",
-                               fake_http_factory([("digitalcommons", 200, {}, page)])), \
+        def fake_page(url):
+            return 200, {"Set-Cookie": "be_cookie=1; Path=/"}, page
+        with mock.patch.object(server, "_fetch_public_page", fake_page), \
              mock.patch.object(server, "_download_pdf", fake_dl):
             out = server.tool_save_work(
                 {"url": "https://digitalcommons.andrews.edu/auss/vol56/iss1/6/"})
@@ -409,8 +545,9 @@ class SaveWork(unittest.TestCase):
                 '?article=1&amp;context=auss"/>')
         def fake_dl(url, **kw):
             raise server.ToolError("target did not return a PDF")
-        with mock.patch.object(server, "http",
-                               fake_http_factory([("digitalcommons", 200, {}, page)])), \
+        def fake_page(url):
+            return 200, {}, page
+        with mock.patch.object(server, "_fetch_public_page", fake_page), \
              mock.patch.object(server, "_download_pdf", fake_dl):
             out = server.tool_save_work(
                 {"url": "https://digitalcommons.andrews.edu/auss/vol56/iss1/6/"})

@@ -57,6 +57,7 @@ LOCATE = "https://andrews.locate.ebsco.com"
 LIBCAL = "https://andrews.libcal.com"
 LIBGUIDES = "https://libguides.andrews.edu"
 DIGCOMMONS = "https://digitalcommons.andrews.edu"
+DIGCOMMONS_HOST = "digitalcommons.andrews.edu"
 EZPROXY_LOGIN = "https://ezproxy.andrews.edu/login?url="
 SPACES_LID, SPACES_GID = 5524, 9604
 UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -69,6 +70,57 @@ def log(msg):
 
 class ToolError(Exception):
     pass
+
+
+def _as_int(value, default, what, minimum=None, maximum=None):
+    """Coerce a model-supplied integer argument with an actionable error."""
+    if value in (None, ""):
+        result = default
+    elif isinstance(value, bool):
+        raise ToolError("`{}` must be a whole number (got {!r})".format(what, value))
+    elif isinstance(value, int):
+        result = value
+    elif isinstance(value, float) and value.is_integer():
+        result = int(value)
+    elif isinstance(value, str):
+        try:
+            result = int(value)
+        except ValueError:
+            raise ToolError("`{}` must be a whole number (got {!r})".format(what, value))
+    else:
+        raise ToolError("`{}` must be a whole number (got {!r})".format(what, value))
+    if minimum is not None and result < minimum:
+        raise ToolError("`{}` must be at least {}".format(what, minimum))
+    if maximum is not None and result > maximum:
+        raise ToolError("`{}` must be at most {}".format(what, maximum))
+    return result
+
+
+def _as_bool(value, what, default=False):
+    """Coerce a model-supplied boolean argument with an actionable error.
+
+    Only true/false booleans, 1/0, and the strings 'true'/'false' (any case)
+    are accepted — a string like "false" must not silently become True.
+    """
+    if value is None or value == "":
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and float(value) in (0.0, 1.0):
+        return bool(value)
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in ("true", "1", "yes", "on"):
+            return True
+        if low in ("false", "0", "no", "off"):
+            return False
+    raise ToolError("`{}` must be true or false (got {!r})".format(what, value))
+
+
+def _is_digitalcommons(url):
+    """Exact host match for Digital Commons (no substring/trailing-dot bypass)."""
+    host = (urllib.parse.urlparse(url).hostname or "").lower().rstrip(".")
+    return host == DIGCOMMONS_HOST or host.endswith("." + DIGCOMMONS_HOST)
 
 
 def _http_url(url):
@@ -157,12 +209,33 @@ def location_name(loc_id):
     return _locations_cache.get(loc_id, loc_id if _locations_cache.get("_unavailable") else None)
 
 
+def _first_pub(instance):
+    """First publication entry, tolerating upstream shape drift (list vs dict)."""
+    pubs = instance.get("publication")
+    if isinstance(pubs, dict):
+        return pubs
+    if isinstance(pubs, list) and pubs and isinstance(pubs[0], dict):
+        return pubs[0]
+    return {}
+
+
+def _http_uris(entries):
+    """Deduplicated http(s) URIs from an electronicAccess list (any shape)."""
+    out = []
+    for e in entries or []:
+        uri = e.get("uri") if isinstance(e, dict) else None
+        if _http_url(uri or "") and uri not in out:
+            out.append(uri)
+    return out
+
+
 def slim_instance(i):
-    pub = (i.get("publication") or [{}])[0]
+    pub = _first_pub(i)
     out = {
         "id": i.get("id"),
         "title": i.get("title"),
-        "contributors": [c.get("name") for c in (i.get("contributors") or [])[:4]],
+        "contributors": [c.get("name") for c in (i.get("contributors") or [])[:4]
+                         if isinstance(c, dict)],
         "published": pub.get("dateOfPublication"),
         "publisher": pub.get("publisher"),
         "type": ", ".join(i.get("instanceFormats") or []) or None,
@@ -176,8 +249,8 @@ def tool_catalog_search(args):
     query = (args.get("query") or "").strip()
     if not query:
         raise ToolError('`query` required, e.g. {"query": "bonhoeffer discipleship"}')
-    limit = min(int(args.get("limit") or 10), 30)
-    offset = int(args.get("offset") or 0)
+    limit = _as_int(args.get("limit"), 10, "limit", minimum=1, maximum=30)
+    offset = _as_int(args.get("offset"), 0, "offset", minimum=0)
     field = args.get("field") or "keyword"
     if field not in ("keyword", "title", "contributors", "subject", "isbn"):
         raise ToolError("field must be keyword|title|contributors|subject|isbn")
@@ -217,8 +290,7 @@ def tool_catalog_item(args):
             "barcode": it.get("barcode"),
         })
     out["copies"] = copies
-    ea = [e.get("uri") for e in (i.get("electronicAccess") or [])
-          if _http_url(e.get("uri") or "")][:3]
+    ea = _http_uris(i.get("electronicAccess"))[:3]
     if ea:
         out["electronic_access"] = ea
     return {k: v for k, v in out.items() if v is not None}
@@ -238,7 +310,7 @@ def tool_journal_lookup(args):
     if not query:
         raise ToolError('`query` required — a journal title, e.g. '
                         '{"query": "Journal of Biblical Literature"}')
-    limit = min(int(args.get("limit") or 5), 15)
+    limit = _as_int(args.get("limit"), 5, "limit", minimum=1, maximum=15)
     filtered = 'title all "{}" and modeOfIssuanceId=="{}"'.format(
         cql_escape(query), SERIAL_MODE_ID)
     data = okapi_get("/search/instances",
@@ -255,15 +327,16 @@ def tool_journal_lookup(args):
                     "matches instead (some may be books).")
     journals = []
     for i in data.get("instances", []):
-        e_links = [e.get("uri") for e in (i.get("electronicAccess") or [])
-                   if _http_url(e.get("uri") or "")]
+        e_links = _http_uris(i.get("electronicAccess"))
         for h in i.get("holdings") or []:
-            e_links += [e.get("uri") for e in (h.get("electronicAccess") or [])
-                        if _http_url(e.get("uri") or "")]
-        e_links = list(dict.fromkeys(e_links))[:5]
+            if isinstance(h, dict):
+                e_links += _http_uris(h.get("electronicAccess"))
+        e_links = e_links[:5]
         items = i.get("items") or []
         locs, call_nos, physical_items = {}, [], []
         for it in items:
+            if not isinstance(it, dict):
+                continue
             ln = location_name(it.get("effectiveLocationId"))
             cn = (it.get("effectiveCallNumberComponents") or {}).get("callNumber")
             if not ln and not cn:
@@ -275,7 +348,7 @@ def tool_journal_lookup(args):
                 call_nos.append(cn)
         entry = {
             "title": i.get("title"),
-            "publication": (i.get("publication") or [{}])[0].get("publisher"),
+            "publication": _first_pub(i).get("publisher"),
             "catalog_url": "{}/instances/{}".format(LOCATE, i.get("id")),
         }
         if e_links:
@@ -306,7 +379,7 @@ def tool_journal_lookup(args):
 
 def tool_course_reserves(args):
     query = (args.get("query") or "").strip()
-    limit = min(int(args.get("limit") or 15), 40)
+    limit = _as_int(args.get("limit"), 15, "limit", minimum=1, maximum=40)
     cql = 'name all "{}"'.format(cql_escape(query)) if query else "name=*"
     data = okapi_get("/opac-courses/courses",
                      {"query": cql, "limit": str(limit)})
@@ -329,7 +402,7 @@ def tool_course_reserves(args):
 
 
 def tool_hours(args):
-    weeks = min(int(args.get("weeks") or 1), 4)
+    weeks = _as_int(args.get("weeks"), 1, "weeks", minimum=1, maximum=4)
     status, _, body = http("{}/api_hours_grid.php?iid=0&format=json&weeks={}"
                            .format(LIBCAL, weeks))
     if status != 200:
@@ -357,8 +430,12 @@ def tool_hours(args):
 
 def tool_rooms(args):
     date = args.get("date") or time.strftime("%Y-%m-%d")
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
-        raise ToolError("date must be YYYY-MM-DD")
+    if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise ToolError("date must be a YYYY-MM-DD string, e.g. 2026-09-01")
+    try:
+        time.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise ToolError("date {} is not a real calendar day — use YYYY-MM-DD".format(date))
     result = {"date": date,
               "book_url": "{}/spaces?lid={}&gid={}".format(LIBCAL, SPACES_LID, SPACES_GID),
               "note": "Booking always happens in YOUR browser (login required) — "
@@ -438,8 +515,7 @@ def tool_databases(args):
     if query:
         items = [d for d in items
                  if query in (d.get("name") or "").lower()
-                 or query in (d.get("description") or "").lower()
-                 or any(query in (s or "").lower() for s in d.get("subjects") or [])]
+                 or query in (d.get("description") or "").lower()]
     total = len(items)
     return {"total": total, "shown": min(total, 40), "databases": items[:40],
             "az_page": LIBGUIDES + "/az/databases",
@@ -510,7 +586,7 @@ def parse_oai_records(xml):
 
 def tool_digitalcommons(args):
     query = (args.get("query") or "").strip()
-    days = int(args.get("days") or 0)
+    days = _as_int(args.get("days"), 0, "days", minimum=0)
     token = args.get("resumption_token")
     if args.get("list_sets"):
         sets, seen_specs, seen_tokens, set_token, pages = [], set(), set(), None, 0
@@ -575,7 +651,15 @@ def _gated(url):
 
 
 def _validate_public_http_url(url, resolve=False):
-    """Reject non-web, credential-bearing, local, and private-network URLs."""
+    """Reject non-web, credential-bearing, local, and private-network URLs.
+
+    resolve=True also resolves the hostname and rejects any private/loopback/
+    link-local/multicast/reserved address. Residual risk (accepted, documented):
+    DNS rebinding between this validation resolution and urllib's later
+    connect is possible in theory; connecting to the validated IP instead of
+    re-resolving would require a custom opener, which the stdlib-only
+    constraint makes disproportionate for a local single-user tool.
+    """
     if not _http_url(url):
         raise ToolError("download URL must be a public http(s) URL without credentials")
     p = urllib.parse.urlparse(url)
@@ -617,6 +701,26 @@ def _sanctioned_path_msg(url_or_doi):
             "save the PDF there (Zotero's connector captures PDF + metadata "
             "in one click), and the zotero MCP can then read its full text "
             "locally. Reference: {}".format(url_or_doi))
+
+
+def _fetch_public_page(url, timeout=30):
+    """Fetch an HTML page with the same public-network + redirect guards as
+    _download_pdf (SSRF-safe), returning (status, headers, body).
+
+    Headers are the raw HTTPMessage so callers can read every Set-Cookie
+    (http() collapses duplicates to the last one).
+    """
+    _validate_public_http_url(url, resolve=True)
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    try:
+        with urllib.request.build_opener(_PublicRedirectHandler()).open(
+                req, timeout=timeout) as resp:
+            return resp.status, resp.headers, resp.read().decode("utf-8", "replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.headers, e.read().decode("utf-8", "replace")
+    except socket.timeout:
+        raise ToolError("request to {} timed out — retry once".format(
+            urllib.parse.urlparse(url).netloc))
 
 
 def _download_pdf(url, save_as=None, overwrite=False, referer=None, cookies=None):
@@ -703,10 +807,15 @@ def resolve_oa_pdf(doi):
 
 
 def tool_save_work(args):
-    doi = (args.get("doi") or "").strip().replace("https://doi.org/", "")
+    doi = (args.get("doi") or "").strip()
+    for prefix in ("https://doi.org/", "http://doi.org/", "https://dx.doi.org/",
+                   "http://dx.doi.org/", "doi:"):
+        if doi.lower().startswith(prefix):
+            doi = doi[len(prefix):]
+            break
     url = (args.get("url") or "").strip()
     save_as = args.get("save_as")
-    overwrite = bool(args.get("overwrite"))
+    overwrite = _as_bool(args.get("overwrite"), "overwrite")
     if not doi and not url:
         raise ToolError("pass `doi` (e.g. 10.1234/abc) or `url` (a Digital "
                         "Commons page/PDF or any open-access PDF link)")
@@ -737,11 +846,11 @@ def tool_save_work(args):
     # URL path: Digital Commons page → citation_pdf_url; else direct open PDF.
     # bepress serves viewcontent.cgi only to sessions that visited the
     # article page first — carry its cookies + referer into the PDF request.
-    if "digitalcommons.andrews.edu" in urllib.parse.urlparse(url).netloc:
+    if _is_digitalcommons(url):
         page_url = url
         cookies = None
         if "viewcontent.cgi" not in url:
-            status, hdrs, body = http(url)
+            status, hdrs, body = _fetch_public_page(url)
             if status != 200:
                 raise ToolError("Digital Commons page returned HTTP {}".format(status))
             m = re.search(r'citation_pdf_url"\s+content="([^"]+)"', body)
@@ -864,7 +973,7 @@ TOOLS = [
          "date": {"type": "string", "description": "YYYY-MM-DD, default today"}}}},
     {"name": "databases",
      "description": "Research databases A-Z (ATLA, JSTOR, ProQuest, EBSCO...) with "
-                    "access links. Optional query filters by name/description/subject "
+                    "access links. Optional query filters by name/description "
                     "(e.g. 'theology', 'nursing'). Links are already EZproxy-wrapped "
                     "where the library requires it.",
      "inputSchema": {"type": "object", "properties": {

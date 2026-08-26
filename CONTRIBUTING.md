@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for improving Andrews Library MCP. Contributions must preserve three invariants: **read-only behavior**, **no user credentials**, and **dependency-free local execution**.
+Thank you for improving Andrews Library MCP. Contributions must preserve three invariants: **read-only with respect to library state** (the sole local write is `save_work` storing a legally-obtained open-access PDF), **no user credentials**, and **dependency-free local execution**.
 
 ## Before opening an issue
 
@@ -68,7 +68,7 @@ A pull request changing a tool schema should test:
 
 ## Pull-request checklist
 
-- [ ] Read-only and credential-free boundaries remain intact
+- [ ] Read-only (with respect to library state) and credential-free boundaries remain intact; the only permitted local write is `save_work` open-access saving
 - [ ] No user, account, cookie, token, licensed document, or private response was added
 - [ ] Existing tool names remain compatible or are explicitly deprecated
 - [ ] Tests cover the change and all local gates pass

@@ -20,7 +20,7 @@ Do **not** include real institutional credentials, browser sessions, licensed do
 
 ## Security model
 
-This server is local, read-only, and credential-free. It fetches public data, dynamically obtains an anonymous catalog guest token, and returns browser links for any authenticated user action. It must never collect passwords, cookies, or SSO sessions.
+This server is local, credential-free, and read-only with respect to library state. It fetches public data, dynamically obtains an anonymous catalog guest token, and returns browser links for any authenticated user action. The only local write is `save_work`, which stores a legally-obtained open-access PDF into `~/.hermes/andrews-library/files/`; it refuses licensed/EZproxy-gated hosts by design. It must never collect passwords, cookies, or SSO sessions.
 
 ## Out of scope
 

@@ -1,6 +1,6 @@
 manifest_version: 1
 name: andrews-library
-description: Read-only public access to Andrews University James White Library systems and browser-only authenticated link-outs.
+description: Read-only access to Andrews University James White Library public systems, legal open-access full-text saving, and browser-only authenticated link-outs.
 source: https://www.andrews.edu/services/library/
 transport:
   type: stdio
