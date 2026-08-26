@@ -1,0 +1,13 @@
+manifest_version: 1
+name: andrews-library
+description: Read-only public access to Andrews University James White Library systems and browser-only authenticated link-outs.
+source: https://www.andrews.edu/services/library/
+transport:
+  type: stdio
+  command: /usr/bin/python3
+  args:
+    - ${userHome}/.hermes/mcp-servers/andrews-library/server.py
+  version: "1.0.0"
+auth:
+  type: none
+post_install: No MCP credential is required. Room booking and EZproxy authentication occur only in the user's browser.

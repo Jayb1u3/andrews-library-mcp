@@ -1,0 +1,10 @@
+mcp_servers:
+  andrews-library:
+    command: /usr/bin/python3
+    args:
+      - ${userHome}/.hermes/mcp-servers/andrews-library/server.py
+    connect_timeout: 30
+    timeout: 120
+    supports_parallel_tool_calls: true
+    sampling:
+      enabled: false

@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Jayb1u3/andrews-library-mcp/security/advisories/new
+    about: Report credentials, private data exposure, or exploitable behavior privately.
