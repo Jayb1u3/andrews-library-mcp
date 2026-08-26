@@ -33,7 +33,18 @@ import urllib.parse
 import urllib.request
 
 SERVER_NAME = "andrews-library"
-SERVER_VERSION = "1.1.0"
+SERVER_VERSION = "1.2.0"
+FILES_DIR_NAME = "files"      # under ~/.hermes/andrews-library/
+MAX_DOWNLOAD = 100 * 1024 * 1024
+UNPAYWALL_EMAIL = "jasonpinilla88@gmail.com"
+# Hosts whose content is licensed to the library — automated retrieval
+# through or around EZproxy violates vendor licenses and can get the
+# user's account and campus IP range suspended. save_work refuses these
+# and explains the sanctioned path (browser + Zotero) instead.
+GATED_HOST_MARKERS = ("ezproxy", "jstor.org", "ebsco", "proquest.com",
+                      "atla.com", "ovid.com", "sciencedirect.com",
+                      "springer.com", "wiley.com", "tandfonline.com",
+                      "sagepub.com", "oup.com", "cambridge.org")
 MAX_TEXT = 60_000
 
 OKAPI = "https://okapi-andrews.locate.ebsco.com"
@@ -516,6 +527,178 @@ def tool_digitalcommons(args):
     return out
 
 
+# ------------------------------------------------------------- save_work
+
+from pathlib import Path
+
+
+def _gated(url):
+    host = urllib.parse.urlparse(url).netloc.lower()
+    return any(m in host for m in GATED_HOST_MARKERS)
+
+
+def _sanctioned_path_msg(url_or_doi):
+    return ("This is licensed content — automated retrieval violates the "
+            "library's vendor licenses and risks the user's account and "
+            "campus-wide access, so this tool will not fetch it. Sanctioned "
+            "path: open the EZproxy link in the BROWSER (ezproxy_link tool), "
+            "save the PDF there (Zotero's connector captures PDF + metadata "
+            "in one click), and the zotero MCP can then read its full text "
+            "locally. Reference: {}".format(url_or_doi))
+
+
+def _download_pdf(url, save_as=None, overwrite=False, referer=None, cookies=None):
+    files_dir = Path.home() / ".hermes" / "andrews-library" / FILES_DIR_NAME
+    files_dir.mkdir(parents=True, exist_ok=True)
+    headers = {"User-Agent": UA, "Accept": "application/pdf,*/*"}
+    if referer:
+        headers["Referer"] = referer
+    if cookies:
+        headers["Cookie"] = cookies
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        resp = urllib.request.urlopen(req, timeout=90)
+    except socket.timeout:
+        raise ToolError("download timed out — retry once")
+    with resp:
+        final_url = resp.geturl()
+        if _gated(final_url):
+            raise ToolError(_sanctioned_path_msg(final_url))
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        if "pdf" not in ctype and "octet-stream" not in ctype:
+            raise ToolError("target did not return a PDF (Content-Type {}) — "
+                            "it is probably a landing page or a login wall; "
+                            "use the browser for it".format(ctype[:60] or "?"))
+        name = save_as or ""
+        if not name:
+            cd = resp.headers.get("Content-Disposition") or ""
+            m = re.search(r'filename="?([^";]+)', cd)
+            name = (m.group(1) if m
+                    else urllib.parse.unquote(
+                        urllib.parse.urlparse(final_url).path.rsplit("/", 1)[-1])
+                    or "download.pdf")
+        name = re.sub(r"[^\w.\- ]", "_", name)[:180]
+        if not name.lower().endswith(".pdf"):
+            name += ".pdf"
+        dest = files_dir / name
+        if dest.exists() and not overwrite:
+            raise ToolError("{} already exists — pass overwrite=true or a "
+                            "different save_as".format(dest))
+        part = dest.with_suffix(dest.suffix + ".part")
+        total = 0
+        with open(part, "wb") as f:
+            while True:
+                chunk = resp.read(1 << 16)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > MAX_DOWNLOAD:
+                    part.unlink(missing_ok=True)
+                    raise ToolError("file exceeds the {} MB cap".format(
+                        MAX_DOWNLOAD >> 20))
+                f.write(chunk)
+        part.rename(dest)
+    return {"saved_to": str(dest), "size_bytes": total}
+
+
+def resolve_oa_pdf(doi):
+    """Legal open-access copy for a DOI via Unpaywall (OpenAlex fallback)."""
+    try:
+        body = http("https://api.unpaywall.org/v2/{}?email={}".format(
+            urllib.parse.quote(doi), UNPAYWALL_EMAIL))[2]
+        d = json.loads(body)
+        if d.get("is_oa"):
+            loc = d.get("best_oa_location") or {}
+            pdf = loc.get("url_for_pdf") or loc.get("url")
+            if pdf:
+                return pdf, "unpaywall"
+            for loc in d.get("oa_locations") or []:
+                if loc.get("url_for_pdf"):
+                    return loc["url_for_pdf"], "unpaywall"
+    except Exception:
+        pass
+    try:
+        body = http("https://api.openalex.org/works/doi:{}?mailto={}".format(
+            urllib.parse.quote(doi), UNPAYWALL_EMAIL))[2]
+        oa = (json.loads(body).get("open_access") or {})
+        if oa.get("oa_url"):
+            return oa["oa_url"], "openalex"
+    except Exception:
+        pass
+    return None, None
+
+
+def tool_save_work(args):
+    doi = (args.get("doi") or "").strip().replace("https://doi.org/", "")
+    url = (args.get("url") or "").strip()
+    save_as = args.get("save_as")
+    overwrite = bool(args.get("overwrite"))
+    if not doi and not url:
+        raise ToolError("pass `doi` (e.g. 10.1234/abc) or `url` (a Digital "
+                        "Commons page/PDF or any open-access PDF link)")
+
+    if url and _gated(url):
+        raise ToolError(_sanctioned_path_msg(url))
+
+    if doi:
+        if not re.match(r"^10\.\d{4,}/\S+$", doi):
+            raise ToolError("`doi` must look like 10.1234/xyz (got {!r})".format(doi[:60]))
+        pdf, source = resolve_oa_pdf(doi)
+        if not pdf:
+            return {"saved": False, "doi": doi, "is_open_access": False,
+                    "why": "No legal open-access copy exists for this DOI.",
+                    "sanctioned_path": _sanctioned_path_msg("doi:" + doi),
+                    "ezproxy_url": EZPROXY_LOGIN + urllib.parse.quote(
+                        "https://doi.org/" + doi, safe="")}
+        if _gated(pdf):
+            return {"saved": False, "doi": doi, "is_open_access": True,
+                    "why": "The OA copy resolves to a licensed host — use the "
+                           "browser.", "oa_url": pdf}
+        out = _download_pdf(pdf, save_as=save_as, overwrite=overwrite)
+        out.update(saved=True, doi=doi, source=source, pdf_url=pdf)
+        return out
+
+    # URL path: Digital Commons page → citation_pdf_url; else direct open PDF.
+    # bepress serves viewcontent.cgi only to sessions that visited the
+    # article page first — carry its cookies + referer into the PDF request.
+    if "digitalcommons.andrews.edu" in urllib.parse.urlparse(url).netloc:
+        page_url = url
+        cookies = None
+        if "viewcontent.cgi" not in url:
+            status, hdrs, body = http(url)
+            if status != 200:
+                raise ToolError("Digital Commons page returned HTTP {}".format(status))
+            m = re.search(r'citation_pdf_url"\s+content="([^"]+)"', body)
+            if not m:
+                raise ToolError("no PDF found on that Digital Commons page — "
+                                "is it a metadata-only record?")
+            pdf = html_mod.unescape(m.group(1))
+            raw_cookies = [v.split(";")[0] for k, v in hdrs.items()
+                           if k.lower() == "set-cookie"]
+            cookies = "; ".join(raw_cookies) or None
+        else:
+            pdf = url
+        try:
+            out = _download_pdf(pdf, save_as=save_as, overwrite=overwrite,
+                                referer=page_url, cookies=cookies)
+            out.update(saved=True, source="digitalcommons", pdf_url=pdf)
+            return out
+        except (ToolError, urllib.error.HTTPError):
+            # bepress's CDN 403s non-browser PDF fetches even though the
+            # content is open access. Don't fight the bot wall — hand over
+            # the direct PDF link; it downloads with one click, no login.
+            return {"saved": False, "source": "digitalcommons", "pdf_url": pdf,
+                    "why": "Digital Commons blocks non-browser downloads "
+                           "(CDN bot wall) even though the content is open.",
+                    "how": "Open pdf_url in the browser — it downloads "
+                           "immediately, no login needed. Zotero's connector "
+                           "also captures it in one click."}
+
+    out = _download_pdf(url, save_as=save_as, overwrite=overwrite)
+    out.update(saved=True, source="direct-open", pdf_url=url)
+    return out
+
+
 # ------------------------------------------------------------ links/proxy
 
 
@@ -632,6 +815,22 @@ TOOLS = [
                        "description": "list all collections (setSpec + name)"},
          "resumption_token": {"type": "string",
                               "description": "continue a previous harvest"}}}},
+    {"name": "save_work",
+     "description": "SAVE research full text locally (to ~/.hermes/andrews-library/"
+                    "files/) when a legal automated copy exists: pass `doi` to fetch "
+                    "the open-access copy (Unpaywall/OpenAlex), or `url` for a "
+                    "Digital Commons record or any open PDF link. Digital Commons "
+                    "PDFs are CDN-gated to browsers: the tool then returns the "
+                    "direct pdf_url for a one-click browser save. LICENSED content "
+                    "(EZproxy/JSTOR/EBSCO/ProQuest...) is refused by design — the "
+                    "response explains the browser+Zotero path; never try to work "
+                    "around either refusal.",
+     "inputSchema": {"type": "object", "properties": {
+         "doi": {"type": "string", "description": "e.g. 10.1371/journal.pone.0263310"},
+         "url": {"type": "string",
+                 "description": "Digital Commons page/PDF or open-access PDF URL"},
+         "save_as": {"type": "string", "description": "optional filename override"},
+         "overwrite": {"type": "boolean", "description": "default false"}}}},
     {"name": "ezproxy_link",
      "description": "Wrap any publisher/database URL in the Andrews EZproxy login "
                     "link so the user gets full-text access in their browser.",
@@ -661,6 +860,7 @@ HANDLERS = {
     "databases": tool_databases,
     "guides": tool_guides,
     "digitalcommons": tool_digitalcommons,
+    "save_work": tool_save_work,
     "ezproxy_link": tool_ezproxy_link,
     "library_links": tool_library_links,
 }
