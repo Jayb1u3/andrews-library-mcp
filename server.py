@@ -106,7 +106,9 @@ def _as_bool(value, what, default=False):
         return default
     if isinstance(value, bool):
         return value
-    if isinstance(value, (int, float)) and float(value) in (0.0, 1.0):
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, float) and value in (0.0, 1.0):
         return bool(value)
     if isinstance(value, str):
         low = value.strip().lower()
@@ -703,21 +705,31 @@ def _sanctioned_path_msg(url_or_doi):
             "locally. Reference: {}".format(url_or_doi))
 
 
-def _fetch_public_page(url, timeout=30):
+def _fetch_public_page(url, timeout=30, max_bytes=2 * 1024 * 1024):
     """Fetch an HTML page with the same public-network + redirect guards as
     _download_pdf (SSRF-safe), returning (status, headers, body).
 
     Headers are the raw HTTPMessage so callers can read every Set-Cookie
-    (http() collapses duplicates to the last one).
+    (http() collapses duplicates to the last one). The body read is capped
+    at max_bytes so a hostile-but-public redirect target cannot exhaust
+    memory.
     """
     _validate_public_http_url(url, resolve=True)
     req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
         with urllib.request.build_opener(_PublicRedirectHandler()).open(
                 req, timeout=timeout) as resp:
-            return resp.status, resp.headers, resp.read().decode("utf-8", "replace")
+            body = resp.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                raise ToolError("page exceeded the {} MB read cap".format(
+                    max_bytes >> 20))
+            return resp.status, resp.headers, body.decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, e.headers, e.read().decode("utf-8", "replace")
+        body = e.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ToolError("error page exceeded the {} MB read cap".format(
+                max_bytes >> 20))
+        return e.code, e.headers, body.decode("utf-8", "replace")
     except socket.timeout:
         raise ToolError("request to {} timed out — retry once".format(
             urllib.parse.urlparse(url).netloc))

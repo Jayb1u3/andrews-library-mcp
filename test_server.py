@@ -159,6 +159,22 @@ class InputValidation(unittest.TestCase):
             server._as_bool("maybe", "overwrite")
         with self.assertRaises(server.ToolError):
             server._as_bool(2, "overwrite")
+        with self.assertRaises(server.ToolError):
+            server._as_bool(10 ** 400, "overwrite")  # must not OverflowError
+
+    def test_fetch_public_page_caps_body_size(self):
+        class FakeResp:
+            headers = {}
+            status = 200
+            def read(self, n=-1):
+                return b"x" * 3000
+        with mock.patch("urllib.request.build_opener") as bo:
+            opener = mock.MagicMock()
+            opener.open.return_value.__enter__.return_value = FakeResp()
+            bo.return_value = opener
+            with self.assertRaises(server.ToolError) as cm:
+                server._fetch_public_page("https://example.com/page", max_bytes=100)
+        self.assertIn("cap", str(cm.exception))
 
     def test_save_work_overwrite_string_false_not_truthy(self):
         # regression: bool("false") was True; _as_bool must not repeat that
