@@ -7,7 +7,7 @@ transport:
   command: /usr/bin/python3
   args:
     - ${userHome}/.hermes/mcp-servers/andrews-library/server.py
-  version: "1.0.0"
+  version: "1.1.0"
 auth:
   type: none
 post_install: No MCP credential is required. Room booking and EZproxy authentication occur only in the user's browser.

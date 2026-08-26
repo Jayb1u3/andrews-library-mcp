@@ -12,12 +12,13 @@ The server exposes ten workflow-oriented tools:
 |---|---|
 | `catalog_search` | Search books, media, scores, and other catalog records |
 | `catalog_item` | Retrieve holdings, call numbers, status, and links for one record |
+| `journal_lookup` | Check whether the library carries a specific journal, online (EZproxy links) or in print (call numbers, locations) |
 | `course_reserves` | Find reserve materials by course, instructor, or title |
 | `hours` | Get current and upcoming library opening hours |
 | `rooms` | Find study-room availability and booking links |
 | `databases` | Browse or search the databases A–Z list |
 | `guides` | Find subject and course research guides |
-| `digitalcommons` | Search Andrews Digital Commons and continue paginated harvests |
+| `digitalcommons` | List Digital Commons collections, harvest recent or collection-scoped records, and continue paginated harvests |
 | `ezproxy_link` | Wrap a publisher URL in Andrews' EZproxy sign-in URL |
 | `library_links` | Retrieve curated links for major library services |
 

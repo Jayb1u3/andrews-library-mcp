@@ -33,7 +33,7 @@ import urllib.parse
 import urllib.request
 
 SERVER_NAME = "andrews-library"
-SERVER_VERSION = "1.0.0"
+SERVER_VERSION = "1.1.0"
 MAX_TEXT = 60_000
 
 OKAPI = "https://okapi-andrews.locate.ebsco.com"
@@ -196,6 +196,81 @@ def tool_catalog_item(args):
     if ea:
         out["electronic_access"] = ea
     return {k: v for k, v in out.items() if v is not None}
+
+
+# The tenant's FOLIO "serial" mode-of-issuance id, read off a live serial
+# record (JBL) 2026-08-26. Guests cannot list /modes-of-issuance (403), so
+# this is pinned; journal_lookup falls back to unfiltered search if the
+# filtered query ever returns zero (reference data changed).
+SERIAL_MODE_ID = "068b5344-e2a6-40df-9186-1829e13cd344"
+EJP_PORTAL = ("http://ug3lf7jn4y.search.serialssolutions.com/ejp/"
+              "?libHash=UG3LF7JN4Y#/?language=en-US&titleType=ALL")
+
+
+def tool_journal_lookup(args):
+    query = (args.get("query") or "").strip()
+    if not query:
+        raise ToolError('`query` required — a journal title, e.g. '
+                        '{"query": "Journal of Biblical Literature"}')
+    limit = min(int(args.get("limit") or 5), 15)
+    filtered = 'title all "{}" and modeOfIssuanceId=="{}"'.format(
+        cql_escape(query), SERIAL_MODE_ID)
+    data = okapi_get("/search/instances",
+                     {"query": filtered, "limit": str(limit), "expandAll": "true"})
+    total = data.get("totalRecords", 0)
+    note = None
+    if not total:
+        data = okapi_get("/search/instances",
+                         {"query": 'title all "{}"'.format(cql_escape(query)),
+                          "limit": str(limit), "expandAll": "true"})
+        total = data.get("totalRecords", 0)
+        if total:
+            note = ("No serial-typed record matched — showing all catalog "
+                    "matches instead (some may be books).")
+    journals = []
+    for i in data.get("instances", []):
+        e_links = [e.get("uri") for e in (i.get("electronicAccess") or []) if e.get("uri")]
+        for h in i.get("holdings") or []:
+            e_links += [e.get("uri") for e in (h.get("electronicAccess") or []) if e.get("uri")]
+        e_links = list(dict.fromkeys(e_links))[:5]
+        items = i.get("items") or []
+        locs, call_nos = {}, []
+        for it in items:
+            ln = location_name(it.get("effectiveLocationId"))
+            if ln:
+                locs[ln] = locs.get(ln, 0) + 1
+            cn = (it.get("effectiveCallNumberComponents") or {}).get("callNumber")
+            if cn and cn not in call_nos:
+                call_nos.append(cn)
+        entry = {
+            "title": i.get("title"),
+            "publication": (i.get("publication") or [{}])[0].get("publisher"),
+            "catalog_url": "{}/instances/{}".format(LOCATE, i.get("id")),
+        }
+        if e_links:
+            entry["online"] = [{"url": u,
+                                "ezproxy_url": EZPROXY_LOGIN + urllib.parse.quote(u, safe="")}
+                               for u in e_links]
+        if items:
+            entry["print_holdings"] = {
+                "pieces": len(items),
+                "call_numbers": call_nos[:3],
+                "locations": sorted(locs, key=locs.get, reverse=True)[:3],
+            }
+        if not e_links and not items:
+            entry["holdings"] = "record has no items or e-links — check catalog_url"
+        journals.append(entry)
+    out = {"query": query, "total": total, "journals": journals,
+           "ejournal_portal": EJP_PORTAL,
+           "portal_note": "For exact online coverage dates (which years are "
+                          "full-text where), the e-journal portal in the "
+                          "browser is authoritative."}
+    if note:
+        out["note"] = note
+    if not total:
+        out["note"] = ("Not in the catalog under that title. Try a shorter "
+                       "title fragment, or check the e-journal portal link.")
+    return out
 
 
 def tool_course_reserves(args):
@@ -406,6 +481,14 @@ def tool_digitalcommons(args):
     query = (args.get("query") or "").strip()
     days = int(args.get("days") or 0)
     token = args.get("resumption_token")
+    if args.get("list_sets"):
+        xml = oai({"verb": "ListSets"})
+        sets = [{"set": s.group(1), "name": html_mod.unescape(s.group(2))}
+                for s in re.finditer(
+                    r"<setSpec>([^<]+)</setSpec>\s*<setName>([^<]+)</setName>", xml)]
+        return {"count": len(sets), "sets": sets[:150],
+                "tip": "Pass one setSpec as `set` (with days) to harvest just "
+                       "that collection, e.g. dissertations."}
     if query and not days:
         return {"query": query,
                 "search_url": DIGCOMMONS + "/do/search/?" + urllib.parse.urlencode(
@@ -419,6 +502,8 @@ def tool_digitalcommons(args):
         params["resumptionToken"] = token
     else:
         params["metadataPrefix"] = "oai_dc"
+        if args.get("set"):
+            params["set"] = args["set"]
         if days:
             params["from"] = time.strftime("%Y-%m-%d",
                                            time.localtime(time.time() - days * 86400))
@@ -458,6 +543,10 @@ def tool_library_links(args):
         "citation_help": LIBGUIDES + "/CitationHelps",
         "seminary_periodical_index": LIBGUIDES + "/SDAPI/",
         "ellen_white_writings": "http://egwwritings.org",
+        "interlibrary_loan_form": "https://www.andrews.edu/services/library/1_services/illform.html",
+        "melcat_ill": "https://www.andrews.edu/services/library/1_services/melcatill.html",
+        "mel_elibrary": "https://elibrary.mel.org/",
+        "ask_a_librarian": "https://andrews.libanswers.com/",
     }
 
 
@@ -483,11 +572,23 @@ TOOLS = [
                     "catalog_search.",
      "inputSchema": {"type": "object", "properties": {
          "instance_id": {"type": "string"}}, "required": ["instance_id"]}},
+    {"name": "journal_lookup",
+     "description": "Does the library have a specific JOURNAL, and how do I read it? "
+                    "Searches the catalog for serial records by journal title and "
+                    "returns online access links (EZproxy-wrapped) and/or print "
+                    "holdings (call numbers, locations). Use for 'do we have Journal "
+                    "of X' questions; for articles BY TOPIC use databases or "
+                    "catalog_search instead.",
+     "inputSchema": {"type": "object", "properties": {
+         "query": {"type": "string", "description": "journal title, e.g. "
+                                                    "'Journal of Biblical Literature'"},
+         "limit": {"type": "integer", "description": "default 5, max 15"}},
+         "required": ["query"]}},
     {"name": "course_reserves",
-     "description": "Look up course reserves by course name/number (e.g. 'DEMO 201', "
+     "description": "Look up course reserves by course name/number (e.g. 'CHIS 674', "
                     "'Music Lit') — materials instructors placed on reserve at the "
-                    "library. Returns matching courses; the reserves_page link shows "
-                    "the actual items.",
+                    "library. Returns matching courses only; the ITEMS on reserve are "
+                    "not guest-readable (API 404s), so open reserves_page for them.",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string", "description": "course name or number; empty lists all"},
          "limit": {"type": "integer", "description": "default 15, max 40"}}}},
@@ -516,13 +617,19 @@ TOOLS = [
          "query": {"type": "string"}}, "required": ["query"]}},
     {"name": "digitalcommons",
      "description": "Andrews Digital Commons (institutional repository: dissertations, "
-                    "theses, faculty publications, journals). days=N harvests items "
-                    "added in the last N days (OAI-PMH); query returns the browser "
-                    "search link (its search backend is not public).",
+                    "theses, faculty publications, journals). list_sets=true lists the "
+                    "collections; days=N harvests items added in the last N days "
+                    "(optionally scoped by `set`, e.g. the dissertations collection); "
+                    "query returns the browser search link (its search backend is "
+                    "not public).",
      "inputSchema": {"type": "object", "properties": {
          "query": {"type": "string"},
          "days": {"type": "integer",
                   "description": "harvest records from the last N days"},
+         "set": {"type": "string",
+                 "description": "setSpec from list_sets, scopes the harvest"},
+         "list_sets": {"type": "boolean",
+                       "description": "list all collections (setSpec + name)"},
          "resumption_token": {"type": "string",
                               "description": "continue a previous harvest"}}}},
     {"name": "ezproxy_link",
@@ -538,9 +645,16 @@ TOOLS = [
      "inputSchema": {"type": "object", "properties": {}}},
 ]
 
+# Harness strictness contract: every inputSchema declares an explicit
+# `required` list (even when empty) and rejects unknown properties.
+for _t in TOOLS:
+    _t["inputSchema"].setdefault("required", [])
+    _t["inputSchema"].setdefault("additionalProperties", False)
+
 HANDLERS = {
     "catalog_search": tool_catalog_search,
     "catalog_item": tool_catalog_item,
+    "journal_lookup": tool_journal_lookup,
     "course_reserves": tool_course_reserves,
     "hours": tool_hours,
     "rooms": tool_rooms,
@@ -562,8 +676,15 @@ def handle(msg):
     def ok(result):
         return {"jsonrpc": "2.0", "id": msg_id, "result": result}
 
+    if not isinstance(params, dict):
+        return {"jsonrpc": "2.0", "id": msg_id,
+                "error": {"code": -32602, "message": "params must be an object"}}
+
     if method == "initialize":
-        return ok({"protocolVersion": params.get("protocolVersion") or "2025-03-26",
+        supported = ("2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25")
+        requested = params.get("protocolVersion")
+        return ok({"protocolVersion": requested if requested in supported
+                   else supported[-1],
                    "capabilities": {"tools": {}},
                    "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION}})
     if method == "ping":
@@ -576,8 +697,14 @@ def handle(msg):
         if not handler:
             return {"jsonrpc": "2.0", "id": msg_id,
                     "error": {"code": -32602, "message": "unknown tool: {}".format(name)}}
+        args_in = params.get("arguments") or {}
+        if not isinstance(args_in, dict):
+            return ok({"content": [{"type": "text",
+                                    "text": "arguments must be a JSON object of "
+                                            "tool parameters, e.g. {\"query\": \"...\"}"}],
+                       "isError": True})
         try:
-            result = handler(params.get("arguments") or {})
+            result = handler(args_in)
             text = json.dumps(result, indent=2, ensure_ascii=False)
             if len(text) > MAX_TEXT:
                 text = text[:MAX_TEXT] + "\n…[truncated — narrow the request]"
@@ -606,6 +733,10 @@ def main():
         try:
             msg = json.loads(line)
         except json.JSONDecodeError:
+            sys.stdout.write(json.dumps(
+                {"jsonrpc": "2.0", "id": None,
+                 "error": {"code": -32700, "message": "parse error: invalid JSON"}}) + "\n")
+            sys.stdout.flush()
             continue
         try:
             resp = handle(msg)

@@ -4,7 +4,7 @@ This roadmap describes intended direction, not guaranteed dates. Security, read-
 
 ## Current baseline
 
-- Ten read-only, task-shaped tools
+- Eleven read-only, task-shaped tools (journal lookup added in 1.1.0)
 - Public catalog, holdings, reserves, hours, rooms, databases, guides, Digital Commons, EZproxy-link, and navigation coverage
 - Pure Python standard-library stdio server
 - Offline tests, protocol smoke gate, and secret/runtime-artifact scan
@@ -13,7 +13,7 @@ This roadmap describes intended direction, not guaranteed dates. Security, read-
 ## Near term
 
 - Expand synthetic parser fixtures for upstream HTML/JSON shape changes
-- Add deterministic timeout and malformed-upstream tests
+- ~~Add deterministic timeout and malformed-upstream tests~~ (1.1.0: malformed-input and error-path coverage via test suite + contract harness)
 - Improve continuation metadata consistency across paginated tools
 - Document supported Python/Hermes versions per release
 - Add release tags and generated checksums
