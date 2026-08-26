@@ -19,7 +19,6 @@ The server exposes ten workflow-oriented tools:
 | `databases` | Browse or search the databases A–Z list |
 | `guides` | Find subject and course research guides |
 | `digitalcommons` | List Digital Commons collections, harvest recent or collection-scoped records, and continue paginated harvests |
-| `save_work` | Save open-access full text locally (DOI via Unpaywall, Digital Commons, open PDF links); licensed content gets the browser+Zotero path |
 | `ezproxy_link` | Wrap a publisher URL in Andrews' EZproxy sign-in URL |
 | `library_links` | Retrieve curated links for major library services |
 

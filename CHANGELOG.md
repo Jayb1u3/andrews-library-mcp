@@ -2,16 +2,6 @@
 
 All notable changes to this project will be documented here. The project follows [Semantic Versioning](https://semver.org/).
 
-## [1.2.0] - 2026-08-26
-
-### Added
-
-- `save_work`: legitimately save research full text locally — resolves DOIs to legal open-access copies (Unpaywall, OpenAlex fallback) and downloads them; extracts Digital Commons PDF URLs (returning a one-click browser link when the bepress CDN blocks non-browser fetches); accepts direct open PDF URLs. Streams through a bounded `.part` file with a 100 MB cap and no silent overwrites.
-
-### Security
-
-- `save_work` refuses licensed/EZproxy-gated hosts by design and responds with the sanctioned browser + Zotero capture path — valid user credentials do not make automated vendor retrieval license-compliant, so the tool never attempts it.
-
 ## [1.1.0] - 2026-08-26
 
 ### Added
