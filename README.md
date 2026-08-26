@@ -1,12 +1,12 @@
 # Andrews Library MCP
 
-A dependency-free, read-only Model Context Protocol (MCP) server for the public systems of Andrews University's James White Library.
+A dependency-free Model Context Protocol (MCP) server for the public systems of Andrews University's James White Library. Every source is fully reachable: catalogs, holdings, hours, rooms, databases, guides, a complete and paginated Digital Commons harvest, legal open-access full-text saving, and browser link-outs for licensed content.
 
 > **Community project:** This repository is not an official Andrews University, James White Library, EBSCO, LibCal, LibGuides, Moodle, or Anthology product. Public upstream services may change without notice.
 
 ## What it provides
 
-The server exposes ten workflow-oriented tools:
+The server exposes twelve workflow-oriented tools:
 
 | Tool | Use it for |
 |---|---|
@@ -18,12 +18,12 @@ The server exposes ten workflow-oriented tools:
 | `rooms` | Find study-room availability and booking links |
 | `databases` | Browse or search the databases A–Z list |
 | `guides` | Find subject and course research guides |
-| `digitalcommons` | List Digital Commons collections, harvest recent or collection-scoped records, and continue paginated harvests |
+| `digitalcommons` | List all Digital Commons collections, harvest recent or collection-scoped records, and follow resumption tokens for complete paginated harvests |
 | `save_work` | Save open-access full text locally (DOI via Unpaywall, Digital Commons, open PDF links); licensed content gets the browser+Zotero path |
 | `ezproxy_link` | Wrap a publisher URL in Andrews' EZproxy sign-in URL |
 | `library_links` | Retrieve curated links for major library services |
 
-All tools are read-only. Booking, EZproxy, and other authenticated actions happen only after the user opens a returned URL in their own browser.
+The tools never mutate library state and never touch credentials. The one local write is `save_work`, which stores a legally-obtained open-access PDF into `~/.hermes/andrews-library/files/`. All other authenticated actions (booking, EZproxy, ILL) happen only after the user opens a returned URL in their own browser.
 
 ## Privacy and trust boundary
 
@@ -82,7 +82,7 @@ Use an absolute interpreter path. On macOS, `/usr/bin/python3` follows the local
 hermes mcp test andrews-library
 ```
 
-A successful test should discover ten tools. Start a fresh Hermes session or run `/reload-mcp` on a surface that supports it.
+A successful test should discover twelve tools. Start a fresh Hermes session or run `/reload-mcp` on a surface that supports it.
 
 ### 4. Try a user workflow
 
@@ -98,10 +98,12 @@ The model sees these tools as `mcp__andrews_library__<tool>` when the server key
 
 1. Start with the task-shaped discovery tool (`catalog_search`, `course_reserves`, `databases`, `guides`, or `digitalcommons`).
 2. Use `catalog_item` only with an `instance_id` returned by `catalog_search`; never guess identifiers.
-3. Use `hours` for opening times and `rooms` for room availability; do not infer one from the other.
-4. Use `ezproxy_link` only to construct a browser sign-in link. Never ask a user to give the model an Andrews password or browser cookie.
-5. Treat availability, hours, and room slots as time-sensitive. State when the tool response was obtained and provide the source URL when present.
-6. If a tool returns pagination or a continuation token, disclose that more results exist before deciding the search is exhaustive.
+3. For Digital Commons, use `digitalcommons` with `list_sets=true` to find collections, then harvest using `set` and `days`. For large collections, the tool follows resumption tokens automatically to ensure a complete harvest.
+4. Use `save_work` for legal open-access PDFs. If a record is licensed/gated, the tool will return the sanctioned browser+Zotero path; do not attempt to bypass these refusals.
+5. Use `hours` for opening times and `rooms` for room availability; do not infer one from the other.
+6. Use `ezproxy_link` only to construct a browser sign-in link. Never ask a user to give the model an Andrews password or browser cookie.
+7. Treat availability, hours, and room slots as time-sensitive. State when the tool response was obtained and provide the source URL when present.
+8. If a tool returns pagination or a continuation token, disclose that more results exist before deciding the search is exhaustive.
 
 ### Good agent prompts
 

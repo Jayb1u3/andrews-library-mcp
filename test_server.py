@@ -6,6 +6,8 @@ library systems."""
 
 import json
 import os
+import subprocess
+import sys
 import unittest
 from unittest import mock
 
@@ -48,6 +50,44 @@ class Protocol(unittest.TestCase):
         for t in server.TOOLS:
             self.assertGreaterEqual(len(t["description"]), 40, t["name"])
             self.assertIn("inputSchema", t)
+            self.assertIn("required", t["inputSchema"])
+            self.assertIs(t["inputSchema"].get("additionalProperties"), False)
+
+    def test_falsy_nonobject_params_are_rejected(self):
+        for value in ([], "", 0, False):
+            r = server.handle({"jsonrpc": "2.0", "id": 10,
+                               "method": "tools/list", "params": value})
+            self.assertEqual(r["error"]["code"], -32602, repr(value))
+
+    def test_falsy_nonobject_arguments_are_rejected(self):
+        for value in ([], "", 0, False):
+            r = server.handle({"jsonrpc": "2.0", "id": 11,
+                               "method": "tools/call", "params": {
+                                   "name": "library_links", "arguments": value}})
+            self.assertTrue(r["result"]["isError"], repr(value))
+            self.assertIn("JSON object", r["result"]["content"][0]["text"])
+
+    def test_top_level_nonobject_is_invalid_request(self):
+        for value in ([], "text", 1, False, None):
+            r = server.handle(value)
+            self.assertEqual(r["error"]["code"], -32600, repr(value))
+            self.assertIsNone(r["id"])
+
+    def test_main_recovers_after_malformed_and_nonobject_json(self):
+        ping = json.dumps({"jsonrpc": "2.0", "id": 12, "method": "ping"})
+        proc = subprocess.run(
+            [sys.executable, server.__file__], input="{bad json}\n[]\n" + ping + "\n",
+            text=True, capture_output=True, timeout=10, check=False)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        frames = [json.loads(line) for line in proc.stdout.splitlines()]
+        self.assertEqual([f.get("error", {}).get("code") for f in frames[:2]],
+                         [-32700, -32600])
+        self.assertEqual(frames[2]["result"], {})
+
+    def test_unknown_protocol_falls_back_to_supported_version(self):
+        r = server.handle({"jsonrpc": "2.0", "id": 13, "method": "initialize",
+                           "params": {"protocolVersion": "2099-01-01"}})
+        self.assertNotEqual(r["result"]["protocolVersion"], "2099-01-01")
 
 
 class OkapiAuth(unittest.TestCase):
@@ -144,6 +184,29 @@ class JournalLookup(unittest.TestCase):
         with self.assertRaises(server.ToolError):
             server.tool_journal_lookup({})
 
+    def test_only_http_links_are_actionable(self):
+        inst = {"id": "c" * 36, "title": "Mixed Links", "publication": [{}],
+                "electronicAccess": [
+                    {"uri": "javascript:alert(1)"},
+                    {"uri": "httpx://invalid.example"},
+                    {"uri": "https://valid.example/journal"}],
+                "holdings": [], "items": []}
+        with mock.patch.object(server, "okapi_get",
+                               return_value={"totalRecords": 1, "instances": [inst]}):
+            out = server.tool_journal_lookup({"query": "Mixed Links"})
+        self.assertEqual([x["url"] for x in out["journals"][0]["online"]],
+                         ["https://valid.example/journal"])
+
+    def test_metadata_poor_items_are_not_claimed_as_print_holdings(self):
+        inst = {"id": "d" * 36, "title": "Unknown Format", "publication": [{}],
+                "electronicAccess": [], "holdings": [], "items": [{}]}
+        with mock.patch.object(server, "okapi_get",
+                               return_value={"totalRecords": 1, "instances": [inst]}), \
+             mock.patch.object(server, "location_name", return_value=None):
+            out = server.tool_journal_lookup({"query": "Unknown Format"})
+        self.assertNotIn("print_holdings", out["journals"][0])
+        self.assertIn("holdings", out["journals"][0])
+
 
 class DatabasesParser(unittest.TestCase):
     AZ_HTML = ('<html><div class="mb-4"><div class="az-image"></div>'
@@ -217,6 +280,35 @@ class DigitalCommons(unittest.TestCase):
         out = server.tool_digitalcommons({"query": "hebrews"})
         self.assertIn("do/search", out["search_url"])
 
+    def test_list_sets_follows_resumption_tokens_without_truncation(self):
+        first_sets = "".join(
+            "<set><setSpec>s{}</setSpec><setName>Set {}</setName></set>".format(i, i)
+            for i in range(151))
+        pages = {
+            None: "<OAI-PMH><ListSets>{}<resumptionToken>next</resumptionToken>"
+                  "</ListSets></OAI-PMH>".format(first_sets),
+            "next": ("<OAI-PMH><ListSets><set><setSpec>s151</setSpec>"
+                     "<setName>Set 151</setName></set></ListSets></OAI-PMH>"),
+        }
+        def fake_oai(params):
+            return pages.get(params.get("resumptionToken"))
+        with mock.patch.object(server, "oai", fake_oai):
+            out = server.tool_digitalcommons({"list_sets": True})
+        self.assertEqual(out["count"], 152)
+        self.assertEqual(len(out["sets"]), 152)
+        self.assertEqual(out["sets"][-1]["set"], "s151")
+
+    def test_record_page_is_not_silently_truncated(self):
+        records = "".join(
+            "<record><header><identifier>oai:x:{0}</identifier></header><metadata>"
+            "<dc:title>Record {0}</dc:title></metadata></record>".format(i)
+            for i in range(41))
+        xml = "<OAI-PMH><ListRecords>{}</ListRecords></OAI-PMH>".format(records)
+        with mock.patch.object(server, "oai", return_value=xml):
+            out = server.tool_digitalcommons({"days": 7})
+        self.assertEqual(out["count"], 41)
+        self.assertEqual(len(out["records"]), 41)
+
 
 class HoursRoomsLinks(unittest.TestCase):
     def test_hours_parses_open_and_closed(self):
@@ -241,6 +333,8 @@ class HoursRoomsLinks(unittest.TestCase):
         self.assertTrue(out["ezproxy_url"].startswith(server.EZPROXY_LOGIN))
         with self.assertRaises(server.ToolError):
             server.tool_ezproxy_link({"url": "ftp://x"})
+        with self.assertRaises(server.ToolError):
+            server.tool_ezproxy_link({"url": "httpx://not-http.example"})
 
     def test_library_links_complete(self):
         out = server.tool_library_links({})
@@ -262,6 +356,19 @@ class SaveWork(unittest.TestCase):
             with self.assertRaises(server.ToolError) as cm:
                 server.tool_save_work({"url": u})
             self.assertIn("Zotero", str(cm.exception))
+
+    def test_gated_host_matching_uses_domain_boundaries(self):
+        self.assertTrue(server._gated("https://www.jstor.org/stable/1"))
+        self.assertFalse(server._gated("https://notjstor.org/open.pdf"))
+
+    def test_refuses_nonpublic_and_nonhttp_download_urls_before_network(self):
+        for url in ("file:///tmp/local.pdf", "https://127.0.0.1/private.pdf",
+                    "http://localhost/internal.pdf"):
+            with mock.patch("urllib.request.urlopen",
+                            side_effect=AssertionError("network must not be called")):
+                with self.assertRaises(server.ToolError) as cm:
+                    server.tool_save_work({"url": url})
+            self.assertIn("public http", str(cm.exception).lower())
 
     def test_bad_doi_format(self):
         with self.assertRaises(server.ToolError):

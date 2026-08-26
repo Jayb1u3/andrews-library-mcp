@@ -23,7 +23,9 @@ socket.timeout explicitly (it is not TimeoutError until 3.10).
 """
 
 import html as html_mod
+import ipaddress
 import json
+import os
 import re
 import socket
 import sys
@@ -33,19 +35,21 @@ import urllib.parse
 import urllib.request
 
 SERVER_NAME = "andrews-library"
-SERVER_VERSION = "1.2.0"
+SERVER_VERSION = "1.2.1"
 FILES_DIR_NAME = "files"      # under ~/.hermes/andrews-library/
 MAX_DOWNLOAD = 100 * 1024 * 1024
-UNPAYWALL_EMAIL = "jasonpinilla88@gmail.com"
+UNPAYWALL_EMAIL = os.environ.get(
+    "UNPAYWALL_EMAIL", "andrews-library-mcp@users.noreply.github.com")
 # Hosts whose content is licensed to the library — automated retrieval
 # through or around EZproxy violates vendor licenses and can get the
 # user's account and campus IP range suspended. save_work refuses these
 # and explains the sanctioned path (browser + Zotero) instead.
-GATED_HOST_MARKERS = ("ezproxy", "jstor.org", "ebsco", "proquest.com",
+GATED_HOST_MARKERS = ("ezproxy.andrews.edu", "jstor.org", "ebscohost.com",
+                      "ebsco.com", "proquest.com",
                       "atla.com", "ovid.com", "sciencedirect.com",
                       "springer.com", "wiley.com", "tandfonline.com",
                       "sagepub.com", "oup.com", "cambridge.org")
-MAX_TEXT = 60_000
+MAX_TEXT = 120_000
 
 OKAPI = "https://okapi-andrews.locate.ebsco.com"
 TENANT = "lt00001186"
@@ -65,6 +69,16 @@ def log(msg):
 
 class ToolError(Exception):
     pass
+
+
+def _http_url(url):
+    """Return True only for an absolute HTTP(S) URL without userinfo."""
+    try:
+        p = urllib.parse.urlparse(url)
+        return (p.scheme in ("http", "https") and bool(p.hostname)
+                and p.username is None and p.password is None)
+    except ValueError:
+        return False
 
 
 def http(url, method="GET", headers=None, data=None, timeout=30):
@@ -203,7 +217,8 @@ def tool_catalog_item(args):
             "barcode": it.get("barcode"),
         })
     out["copies"] = copies
-    ea = [e.get("uri") for e in (i.get("electronicAccess") or [])[:3] if e.get("uri")]
+    ea = [e.get("uri") for e in (i.get("electronicAccess") or [])
+          if _http_url(e.get("uri") or "")][:3]
     if ea:
         out["electronic_access"] = ea
     return {k: v for k, v in out.items() if v is not None}
@@ -240,17 +255,22 @@ def tool_journal_lookup(args):
                     "matches instead (some may be books).")
     journals = []
     for i in data.get("instances", []):
-        e_links = [e.get("uri") for e in (i.get("electronicAccess") or []) if e.get("uri")]
+        e_links = [e.get("uri") for e in (i.get("electronicAccess") or [])
+                   if _http_url(e.get("uri") or "")]
         for h in i.get("holdings") or []:
-            e_links += [e.get("uri") for e in (h.get("electronicAccess") or []) if e.get("uri")]
+            e_links += [e.get("uri") for e in (h.get("electronicAccess") or [])
+                        if _http_url(e.get("uri") or "")]
         e_links = list(dict.fromkeys(e_links))[:5]
         items = i.get("items") or []
-        locs, call_nos = {}, []
+        locs, call_nos, physical_items = {}, [], []
         for it in items:
             ln = location_name(it.get("effectiveLocationId"))
+            cn = (it.get("effectiveCallNumberComponents") or {}).get("callNumber")
+            if not ln and not cn:
+                continue
+            physical_items.append(it)
             if ln:
                 locs[ln] = locs.get(ln, 0) + 1
-            cn = (it.get("effectiveCallNumberComponents") or {}).get("callNumber")
             if cn and cn not in call_nos:
                 call_nos.append(cn)
         entry = {
@@ -262,13 +282,13 @@ def tool_journal_lookup(args):
             entry["online"] = [{"url": u,
                                 "ezproxy_url": EZPROXY_LOGIN + urllib.parse.quote(u, safe="")}
                                for u in e_links]
-        if items:
+        if physical_items:
             entry["print_holdings"] = {
-                "pieces": len(items),
+                "pieces": len(physical_items),
                 "call_numbers": call_nos[:3],
                 "locations": sorted(locs, key=locs.get, reverse=True)[:3],
             }
-        if not e_links and not items:
+        if not e_links and not physical_items:
             entry["holdings"] = "record has no items or e-links — check catalog_url"
         journals.append(entry)
     out = {"query": query, "total": total, "journals": journals,
@@ -493,11 +513,27 @@ def tool_digitalcommons(args):
     days = int(args.get("days") or 0)
     token = args.get("resumption_token")
     if args.get("list_sets"):
-        xml = oai({"verb": "ListSets"})
-        sets = [{"set": s.group(1), "name": html_mod.unescape(s.group(2))}
-                for s in re.finditer(
-                    r"<setSpec>([^<]+)</setSpec>\s*<setName>([^<]+)</setName>", xml)]
-        return {"count": len(sets), "sets": sets[:150],
+        sets, seen_specs, seen_tokens, set_token, pages = [], set(), set(), None, 0
+        while True:
+            params = ({"verb": "ListSets", "resumptionToken": set_token}
+                      if set_token else {"verb": "ListSets"})
+            xml = oai(params)
+            pages += 1
+            for s in re.finditer(
+                    r"<setSpec>([^<]+)</setSpec>\s*<setName>([^<]+)</setName>", xml):
+                spec = html_mod.unescape(s.group(1))
+                if spec not in seen_specs:
+                    seen_specs.add(spec)
+                    sets.append({"set": spec, "name": html_mod.unescape(s.group(2))})
+            m = re.search(r"<resumptionToken[^>]*>([^<]+)</resumptionToken>", xml)
+            set_token = html_mod.unescape(m.group(1).strip()) if m else None
+            if not set_token:
+                break
+            if set_token in seen_tokens or pages >= 100:
+                raise ToolError("Digital Commons returned a repeated or excessive "
+                                "ListSets continuation token")
+            seen_tokens.add(set_token)
+        return {"count": len(sets), "sets": sets, "pages": pages,
                 "tip": "Pass one setSpec as `set` (with days) to harvest just "
                        "that collection, e.g. dissertations."}
     if query and not days:
@@ -520,7 +556,7 @@ def tool_digitalcommons(args):
                                            time.localtime(time.time() - days * 86400))
     xml = oai(params)
     recs, next_token = parse_oai_records(xml)
-    out = {"records": recs[:40], "count": len(recs)}
+    out = {"records": recs, "count": len(recs)}
     if next_token:
         out["resumption_token"] = next_token
         out["more"] = "pass resumption_token to continue harvesting"
@@ -533,8 +569,44 @@ from pathlib import Path
 
 
 def _gated(url):
-    host = urllib.parse.urlparse(url).netloc.lower()
-    return any(m in host for m in GATED_HOST_MARKERS)
+    host = (urllib.parse.urlparse(url).hostname or "").lower().rstrip(".")
+    return any(host == marker or host.endswith("." + marker)
+               for marker in GATED_HOST_MARKERS)
+
+
+def _validate_public_http_url(url, resolve=False):
+    """Reject non-web, credential-bearing, local, and private-network URLs."""
+    if not _http_url(url):
+        raise ToolError("download URL must be a public http(s) URL without credentials")
+    p = urllib.parse.urlparse(url)
+    host = (p.hostname or "").lower().rstrip(".")
+    if host == "localhost" or host.endswith(".localhost"):
+        raise ToolError("download URL must be a public http(s) URL, not localhost")
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    addresses = [literal] if literal else []
+    if resolve and not literal:
+        try:
+            port = p.port or (443 if p.scheme == "https" else 80)
+            addresses = [ipaddress.ip_address(info[4][0])
+                         for info in socket.getaddrinfo(host, port,
+                                                       type=socket.SOCK_STREAM)]
+        except (OSError, ValueError) as e:
+            raise ToolError("could not resolve public download host {}: {}".format(host, e))
+    for address in addresses:
+        if (address.is_private or address.is_loopback or address.is_link_local
+                or address.is_multicast or address.is_reserved or address.is_unspecified):
+            raise ToolError("download URL must be a public http(s) URL, not {}"
+                            .format(address))
+    return url
+
+
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_public_http_url(newurl, resolve=True)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _sanctioned_path_msg(url_or_doi):
@@ -548,6 +620,7 @@ def _sanctioned_path_msg(url_or_doi):
 
 
 def _download_pdf(url, save_as=None, overwrite=False, referer=None, cookies=None):
+    _validate_public_http_url(url, resolve=True)
     files_dir = Path.home() / ".hermes" / "andrews-library" / FILES_DIR_NAME
     files_dir.mkdir(parents=True, exist_ok=True)
     headers = {"User-Agent": UA, "Accept": "application/pdf,*/*"}
@@ -557,11 +630,12 @@ def _download_pdf(url, save_as=None, overwrite=False, referer=None, cookies=None
         headers["Cookie"] = cookies
     req = urllib.request.Request(url, headers=headers)
     try:
-        resp = urllib.request.urlopen(req, timeout=90)
+        resp = urllib.request.build_opener(_PublicRedirectHandler()).open(req, timeout=90)
     except socket.timeout:
         raise ToolError("download timed out — retry once")
     with resp:
         final_url = resp.geturl()
+        _validate_public_http_url(final_url, resolve=True)
         if _gated(final_url):
             raise ToolError(_sanctioned_path_msg(final_url))
         ctype = (resp.headers.get("Content-Type") or "").lower()
@@ -637,6 +711,8 @@ def tool_save_work(args):
         raise ToolError("pass `doi` (e.g. 10.1234/abc) or `url` (a Digital "
                         "Commons page/PDF or any open-access PDF link)")
 
+    if url:
+        _validate_public_http_url(url)
     if url and _gated(url):
         raise ToolError(_sanctioned_path_msg(url))
 
@@ -704,7 +780,7 @@ def tool_save_work(args):
 
 def tool_ezproxy_link(args):
     url = (args.get("url") or "").strip()
-    if not url.startswith("http"):
+    if not _http_url(url):
         raise ToolError("`url` must be an http(s) URL to proxy")
     return {"ezproxy_url": EZPROXY_LOGIN + urllib.parse.quote(url, safe=""),
             "note": "User opens this in their browser (institutional login). "
@@ -867,9 +943,13 @@ HANDLERS = {
 
 
 def handle(msg):
+    if not isinstance(msg, dict):
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600,
+                          "message": "invalid request: JSON-RPC message must be an object"}}
     method = msg.get("method")
     msg_id = msg.get("id")
-    params = msg.get("params") or {}
+    params = msg["params"] if "params" in msg else {}
     if msg_id is None:
         return None
 
@@ -897,7 +977,7 @@ def handle(msg):
         if not handler:
             return {"jsonrpc": "2.0", "id": msg_id,
                     "error": {"code": -32602, "message": "unknown tool: {}".format(name)}}
-        args_in = params.get("arguments") or {}
+        args_in = params["arguments"] if "arguments" in params else {}
         if not isinstance(args_in, dict):
             return ok({"content": [{"type": "text",
                                     "text": "arguments must be a JSON object of "
@@ -942,7 +1022,8 @@ def main():
             resp = handle(msg)
         except Exception as e:
             log("handler crashed: {}".format(e))
-            resp = {"jsonrpc": "2.0", "id": msg.get("id"),
+            resp = {"jsonrpc": "2.0",
+                    "id": msg.get("id") if isinstance(msg, dict) else None,
                     "error": {"code": -32603, "message": str(e)}}
         if resp is not None:
             sys.stdout.write(json.dumps(resp) + "\n")

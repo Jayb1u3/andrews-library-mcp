@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] - 2026-08-26
+
+### Fixed
+
+- Protocol hardening: lapped gaps in non-object validation to prevent server crashes on falsy values (`[]`, `""`, `0`, `false`)
+- Digital Commons: fixed silent truncation of records (was capped at 40) and implemented automatic resumption token following for `list_sets` to ensure exhaustive collection discovery
+- Security: implemented strict public-network verification for `save_work` to prevent SSRF to local or private IP ranges; added HTTP/HTTPS scheme validation for all links
+- Correctness: fixed `journal_lookup` to only claim `print_holdings` when items have actual call numbers or locations, preventing overstatement of availability
+
 ## [1.2.0] - 2026-08-26
 
 ### Added
