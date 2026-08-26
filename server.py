@@ -38,8 +38,11 @@ SERVER_NAME = "andrews-library"
 SERVER_VERSION = "1.2.1"
 FILES_DIR_NAME = "files"      # under ~/.hermes/andrews-library/
 MAX_DOWNLOAD = 100 * 1024 * 1024
+# Unpaywall's polite pool wants a contact email. Keep it configurable and
+# never a real personal address in source — override via the
+# ANDREWS_LIBRARY_UNPAYWALL_EMAIL environment variable if desired.
 UNPAYWALL_EMAIL = os.environ.get(
-    "UNPAYWALL_EMAIL", "andrews-library-mcp@users.noreply.github.com")
+    "ANDREWS_LIBRARY_UNPAYWALL_EMAIL", "andrews-library-mcp@users.noreply.github.com")
 # Hosts whose content is licensed to the library — automated retrieval
 # through or around EZproxy violates vendor licenses and can get the
 # user's account and campus IP range suspended. save_work refuses these

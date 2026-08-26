@@ -31,6 +31,7 @@ The tools never mutate library state and never touch credentials. The one local 
 - Catalog access uses an anonymous guest token obtained dynamically and cached only in process memory.
 - Usernames, passwords, SSO cookies, and proxy sessions never pass through MCP tool arguments.
 - Public tenant, library, LibCal, and service identifiers are institutional configuration—not personal secrets.
+- The Unpaywall contact email used by `save_work` is a neutral project address by default and configurable via the `ANDREWS_LIBRARY_UNPAYWALL_EMAIL` environment variable — never a personal address.
 - Runtime artifacts and common secret files are excluded by `.gitignore` and checked by `scripts/security_scan.py`.
 
 ## Requirements
