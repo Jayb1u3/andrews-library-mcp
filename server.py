@@ -23,6 +23,7 @@ socket.timeout explicitly (it is not TimeoutError until 3.10).
 """
 
 import html as html_mod
+import datetime
 import ipaddress
 import json
 import os
@@ -438,7 +439,7 @@ def tool_rooms(args):
     if not isinstance(date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
         raise ToolError("date must be a YYYY-MM-DD string, e.g. 2026-09-01")
     try:
-        time.strptime(date, "%Y-%m-%d")
+        date_value = datetime.date.fromisoformat(date)
     except ValueError:
         raise ToolError("date {} is not a real calendar day — use YYYY-MM-DD".format(date))
     result = {"date": date,
@@ -446,8 +447,7 @@ def tool_rooms(args):
               "note": "Booking always happens in YOUR browser (login required) — "
                       "this tool only reads availability."}
     try:
-        end = time.strftime("%Y-%m-%d", time.localtime(
-            time.mktime(time.strptime(date, "%Y-%m-%d")) + 86400))
+        end = (date_value + datetime.timedelta(days=1)).isoformat()
         status, _, body = http(LIBCAL + "/spaces/availability/grid", method="POST",
                                headers={"X-Requested-With": "XMLHttpRequest",
                                         "Referer": result["book_url"]},
@@ -779,45 +779,80 @@ def _download_pdf(url, save_as=None, overwrite=False, referer=None, cookies=None
                             "different save_as".format(dest))
         part = dest.with_suffix(dest.suffix + ".part")
         total = 0
-        with open(part, "wb") as f:
-            while True:
-                chunk = resp.read(1 << 16)
-                if not chunk:
-                    break
-                total += len(chunk)
-                if total > MAX_DOWNLOAD:
-                    part.unlink(missing_ok=True)
-                    raise ToolError("file exceeds the {} MB cap".format(
-                        MAX_DOWNLOAD >> 20))
-                f.write(chunk)
-        part.rename(dest)
+        promoted = False
+        try:
+            with open(part, "wb") as f:
+                while True:
+                    chunk = resp.read(1 << 16)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > MAX_DOWNLOAD:
+                        raise ToolError("file exceeds the {} MB cap".format(
+                            MAX_DOWNLOAD >> 20))
+                    f.write(chunk)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(part), str(dest))
+            promoted = True
+        finally:
+            if not promoted:
+                part.unlink(missing_ok=True)
     return {"saved_to": str(dest), "size_bytes": total}
 
 
 def resolve_oa_pdf(doi):
     """Legal open-access copy for a DOI via Unpaywall (OpenAlex fallback)."""
+    completed = 0
     try:
-        body = http("https://api.unpaywall.org/v2/{}?email={}".format(
-            urllib.parse.quote(doi), UNPAYWALL_EMAIL))[2]
-        d = json.loads(body)
-        if d.get("is_oa"):
-            loc = d.get("best_oa_location") or {}
-            pdf = loc.get("url_for_pdf") or loc.get("url")
-            if pdf:
-                return pdf, "unpaywall"
-            for loc in d.get("oa_locations") or []:
-                if loc.get("url_for_pdf"):
-                    return loc["url_for_pdf"], "unpaywall"
+        status, _, body = http("https://api.unpaywall.org/v2/{}?email={}".format(
+            urllib.parse.quote(doi), UNPAYWALL_EMAIL))
+        if status == 404:
+            completed += 1
+        elif status == 200:
+            d = json.loads(body)
+            if not isinstance(d, dict) or not isinstance(d.get("is_oa"), bool):
+                raise ValueError("malformed Unpaywall response")
+            if not d["is_oa"]:
+                completed += 1
+            else:
+                loc = d.get("best_oa_location") or {}
+                if not isinstance(loc, dict):
+                    raise ValueError("malformed Unpaywall location")
+                pdf = loc.get("url_for_pdf") or loc.get("url")
+                if pdf:
+                    return pdf, "unpaywall"
+                locations = d.get("oa_locations") or []
+                if not isinstance(locations, list):
+                    raise ValueError("malformed Unpaywall locations")
+                for loc in locations:
+                    if not isinstance(loc, dict):
+                        continue
+                    if loc.get("url_for_pdf"):
+                        return loc["url_for_pdf"], "unpaywall"
     except Exception:
         pass
     try:
-        body = http("https://api.openalex.org/works/doi:{}?mailto={}".format(
-            urllib.parse.quote(doi), UNPAYWALL_EMAIL))[2]
-        oa = (json.loads(body).get("open_access") or {})
-        if oa.get("oa_url"):
-            return oa["oa_url"], "openalex"
+        status, _, body = http("https://api.openalex.org/works/doi:{}?mailto={}".format(
+            urllib.parse.quote(doi), UNPAYWALL_EMAIL))
+        if status == 404:
+            completed += 1
+        elif status == 200:
+            data = json.loads(body)
+            if not isinstance(data, dict):
+                raise ValueError("malformed OpenAlex response")
+            oa = data.get("open_access") or {}
+            if not isinstance(oa, dict) or not isinstance(oa.get("is_oa"), bool):
+                raise ValueError("malformed OpenAlex open_access response")
+            if oa.get("oa_url"):
+                return oa["oa_url"], "openalex"
+            if not oa["is_oa"]:
+                completed += 1
     except Exception:
         pass
+    if not completed:
+        raise ToolError("Open-access resolvers were unavailable or returned malformed "
+                        "responses — retry later; OA status is unknown.")
     return None, None
 
 
@@ -1066,6 +1101,52 @@ HANDLERS = {
 }
 
 
+def _bounded_result_copy(value, max_string, max_items, depth=0):
+    """Return a structurally valid, bounded preview of JSON-compatible data."""
+    if depth >= 10:
+        return "[truncated — nesting depth exceeded]"
+    if isinstance(value, str):
+        if len(value) <= max_string:
+            return value
+        omitted = len(value) - max_string
+        return value[:max_string] + "… [truncated {} chars]".format(omitted)
+    if isinstance(value, dict):
+        items = list(value.items())
+        out = {k: _bounded_result_copy(v, max_string, max_items, depth + 1)
+               for k, v in items[:max_items]}
+        if len(items) > max_items:
+            out["__truncated_items__"] = len(items) - max_items
+        return out
+    if isinstance(value, (list, tuple)):
+        out = [_bounded_result_copy(v, max_string, max_items, depth + 1)
+               for v in value[:max_items]]
+        if len(value) > max_items:
+            out.append({"__truncated_items__": len(value) - max_items})
+        return out
+    return value
+
+
+def _serialize_tool_result(result):
+    """Serialize a tool result after structurally bounding oversized data."""
+    text = json.dumps(result, indent=2, ensure_ascii=False)
+    if len(text) <= MAX_TEXT:
+        return text
+    hint = "Result exceeded the response budget; narrow the request."
+    max_string = MAX_TEXT
+    max_items = 100
+    while max_string >= 32:
+        candidate = json.dumps({
+            "truncated": True,
+            "preview": _bounded_result_copy(result, max_string, max_items),
+            "hint": hint,
+        }, indent=2, ensure_ascii=False)
+        if len(candidate) <= MAX_TEXT:
+            return candidate
+        max_string //= 2
+        max_items = max(1, max_items // 2)
+    return json.dumps({"truncated": True, "preview": {}, "hint": hint})
+
+
 def handle(msg):
     if not isinstance(msg, dict):
         return {"jsonrpc": "2.0", "id": None,
@@ -1109,9 +1190,7 @@ def handle(msg):
                        "isError": True})
         try:
             result = handler(args_in)
-            text = json.dumps(result, indent=2, ensure_ascii=False)
-            if len(text) > MAX_TEXT:
-                text = text[:MAX_TEXT] + "\n…[truncated — narrow the request]"
+            text = _serialize_tool_result(result)
             return ok({"content": [{"type": "text", "text": text}], "isError": False})
         except ToolError as e:
             return ok({"content": [{"type": "text", "text": str(e)}], "isError": True})
