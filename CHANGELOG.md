@@ -2,15 +2,24 @@
 
 All notable changes to this project will be documented here. The project follows [Semantic Versioning](https://semver.org/).
 
-## [1.2.1+merge] - 2026-08-26
+## [Unreleased]
+
+### Added
+
+- `save_work` now checks Semantic Scholar between Unpaywall and OpenAlex when resolving a DOI to a legal open-access PDF. The credential-free fallback handles positive, negative, not-found, rate-limited, unavailable, and malformed responses without suppressing the remaining resolvers.
+- New tools `list_saved` (read-only recall of PDFs previously saved by `save_work`) and `citation_export` (RIS/BibTeX export from a catalog `instance_id` for Zotero / bibliography import). `catalog_item` now surfaces a `doi` field when the FOLIO record carries one, closing the catalog → open-access-fetch loop.
 
 ### Fixed
 
-- Reconciled with `origin/main` (which had reverted `save_work` and was later force-pushed as a squashed v1.2.0-era commit): the merge keeps the full-access, hardened v1.2.1 content — `save_work` stays enabled with its SSRF protection and licensed-host refusal, per the final recommendations; adopted the remote's `ANDREWS_LIBRARY_UNPAYWALL_EMAIL` environment variable (configurable, never a personal address in source).
+- Oversized MCP results are now structurally bounded and remain parseable JSON instead of slicing serialized JSON syntax.
+- Resolver outages and malformed responses no longer become unsupported "no open-access copy exists" claims when no resolver completed successfully.
+- Interrupted PDF downloads remove partial files, flush and `fsync` completed data, and atomically promote the file with `os.replace`.
+- Study-room date ranges now use calendar-day arithmetic and remain correct across daylight-saving transitions.
+- Reconciled with `origin/main` (which had reverted `save_work`): the merge keeps the full-access, hardened v1.2.1 content — `save_work` stays enabled with its SSRF protection and licensed-host refusal; adopted the remote's `ANDREWS_LIBRARY_UNPAYWALL_EMAIL` environment variable (configurable, never a personal address in source).
 - Security (SSRF): `save_work` Digital Commons detection now uses an exact host match (`_is_digitalcommons`) instead of a substring check, closing a blind-SSRF bypass via hostnames like `digitalcommons.andrews.edu.127.0.0.1.nip.io`; the Digital Commons page fetch runs through a new `_fetch_public_page` with the same public-network + redirect guards as PDF downloads; documented the residual DNS-rebinding risk.
 - Input validation: all numeric tool arguments (`limit`, `offset`, `weeks`, `days`) now use a strict coercion helper (`_as_int`) that rejects booleans, fractional floats, non-numeric strings, huge/overflowing integers, and out-of-bounds values with actionable errors instead of raw `ValueError`/`OverflowError` tracebacks; `overwrite` uses strict `_as_bool` parsing so a string like `"false"` no longer silently means true; `rooms` rejects non-string and calendar-invalid dates (e.g. `2026-02-30`).
 - Robustness: catalog/journal parsers tolerate upstream shape drift (publication as dict vs list, string entries in `electronicAccess`/`contributors`, non-dict holdings items) via `_first_pub`/`_http_uris`; removed the dead `subjects` filter from `databases` (the A-Z page exposes no subject metadata) and corrected the tool description; `save_work` now strips all common DOI prefixes (`doi:`, `http(s)://doi.org`, `http(s)://dx.doi.org`).
-- Documentation accuracy: README, ROADMAP, SECURITY, CONTRIBUTING, and manifest now agree on twelve tools and the single local write (`save_work`).
+- Documentation accuracy: README, ROADMAP, SECURITY, CONTRIBUTING, and manifest now agree on the tool count and the single local write (`save_work`).
 
 ## [1.2.1] - 2026-08-26
 

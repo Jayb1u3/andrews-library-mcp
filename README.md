@@ -19,7 +19,7 @@ The server exposes fourteen workflow-oriented tools:
 | `databases` | Browse or search the databases A–Z list |
 | `guides` | Find subject and course research guides |
 | `digitalcommons` | List all Digital Commons collections, harvest recent or collection-scoped records, and follow resumption tokens for complete paginated harvests |
-| `save_work` | Save open-access full text locally (DOI via Unpaywall, Digital Commons, open PDF links); licensed content gets the browser+Zotero path |
+| `save_work` | Save open-access full text locally (DOI via Unpaywall → Semantic Scholar → OpenAlex, Digital Commons, or open PDF links); licensed content gets the browser+Zotero path |
 | `ezproxy_link` | Wrap a publisher URL in Andrews' EZproxy sign-in URL |
 | `library_links` | Retrieve curated links for major library services |
 | `list_saved` | List open-access PDFs previously saved by `save_work` (read-only recall of what you already have) |
@@ -34,6 +34,7 @@ The tools never mutate library state and never touch credentials. The one local 
 - Usernames, passwords, SSO cookies, and proxy sessions never pass through MCP tool arguments.
 - Public tenant, library, LibCal, and service identifiers are institutional configuration—not personal secrets.
 - The Unpaywall contact email used by `save_work` is a neutral project address by default and configurable via the `ANDREWS_LIBRARY_UNPAYWALL_EMAIL` environment variable — never a personal address.
+- Semantic Scholar and OpenAlex are credential-free DOI fallbacks; no API key or user account is stored or required.
 - Runtime artifacts and common secret files are excluded by `.gitignore` and checked by `scripts/security_scan.py`.
 
 ## Requirements

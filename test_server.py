@@ -8,7 +8,10 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+import time
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import server
@@ -121,6 +124,30 @@ class InputValidation(unittest.TestCase):
         for bad in (20260801, ["2026-08-01"], b"2026-08-01"):
             with self.assertRaises(server.ToolError):
                 server.tool_rooms({"date": bad})
+
+    @unittest.skipUnless(hasattr(time, "tzset"), "requires POSIX timezone support")
+    def test_rooms_uses_calendar_day_across_dst_fall_back(self):
+        captured = {}
+
+        def fake_http(url, **kwargs):
+            captured.update(kwargs["data"])
+            return 200, {}, json.dumps({"slots": []})
+
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "America/Detroit"
+            time.tzset()
+            with mock.patch.object(server, "http", side_effect=fake_http):
+                server.tool_rooms({"date": "2026-11-01"})
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+
+        self.assertEqual(captured["start"], "2026-11-01")
+        self.assertEqual(captured["end"], "2026-11-02")
 
     def test_hours_bounds(self):
         with self.assertRaises(server.ToolError):
@@ -571,6 +598,63 @@ class SaveWork(unittest.TestCase):
         self.assertIn("viewcontent.cgi", out["pdf_url"])
         self.assertIn("browser", out["how"])
 
+    def test_interrupted_download_removes_partial_file(self):
+        class Response:
+            headers = {"Content-Type": "application/pdf"}
+
+            def __init__(self):
+                self.reads = 0
+
+            def geturl(self):
+                return "https://example.com/paper.pdf"
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, size=-1):
+                self.reads += 1
+                if self.reads == 1:
+                    return b"%PDF-1.7 partial"
+                raise OSError("connection reset")
+
+        opener = mock.MagicMock()
+        opener.open.return_value = Response()
+        with tempfile.TemporaryDirectory() as td, \
+             mock.patch.object(server, "_validate_public_http_url",
+                               side_effect=lambda url, resolve=False: url), \
+             mock.patch.object(server.urllib.request, "build_opener",
+                               return_value=opener), \
+             mock.patch.object(server.Path, "home", return_value=Path(td)):
+            with self.assertRaises(OSError):
+                server._download_pdf("https://example.com/paper.pdf")
+            leftovers = list(Path(td).rglob("*.part"))
+        self.assertEqual(leftovers, [])
+
+    def test_oa_resolver_outage_is_not_reported_as_non_oa(self):
+        with mock.patch.object(server, "http",
+                               return_value=(503, {}, "<html>maintenance</html>")):
+            with self.assertRaises(server.ToolError) as cm:
+                server.tool_save_work({"doi": "10.1234/outage"})
+        self.assertIn("resolver", str(cm.exception).lower())
+        self.assertIn("retry", str(cm.exception).lower())
+
+    def test_malformed_oa_responses_are_not_reported_as_non_oa(self):
+        with mock.patch.object(server, "http", return_value=(200, {}, "[]")):
+            with self.assertRaises(server.ToolError) as cm:
+                server.resolve_oa_pdf("10.1234/malformed")
+        self.assertIn("malformed", str(cm.exception).lower())
+
+    def test_one_definitive_negative_oa_response_is_enough(self):
+        responses = [
+            (200, {}, json.dumps({"is_oa": False})),
+            (503, {}, "maintenance"),
+        ]
+        with mock.patch.object(server, "http", side_effect=responses):
+            self.assertEqual(server.resolve_oa_pdf("10.1234/closed"), (None, None))
+
     def test_unpaywall_parse(self):
         body = json.dumps({"is_oa": True, "best_oa_location":
                            {"url_for_pdf": "https://open.org/a.pdf"}})
@@ -579,16 +663,70 @@ class SaveWork(unittest.TestCase):
             pdf, src = server.resolve_oa_pdf("10.1/x")
         self.assertEqual((pdf, src), ("https://open.org/a.pdf", "unpaywall"))
 
+    def test_semantic_scholar_fallback_after_unpaywall(self):
+        calls = []
+        responses = [
+            (200, {}, json.dumps({"is_oa": False})),
+            (200, {}, json.dumps({
+                "isOpenAccess": True,
+                "openAccessPdf": {"url": "https://open.org/s2.pdf"},
+            })),
+        ]
+
+        def fake_http(url, **kwargs):
+            calls.append(url)
+            return responses.pop(0)
+
+        with mock.patch.object(server, "http", side_effect=fake_http):
+            result = server.resolve_oa_pdf("10.1234/s2")
+        self.assertEqual(result, ("https://open.org/s2.pdf", "semantic-scholar"))
+        self.assertIn("unpaywall.org", calls[0])
+        self.assertIn("api.semanticscholar.org", calls[1])
+        self.assertIn("DOI:10.1234%2Fs2", calls[1])
+
+    def test_semantic_scholar_negative_responses_fall_through_to_openalex(self):
+        openalex = json.dumps({
+            "open_access": {"is_oa": True, "oa_url": "https://open.org/oa.pdf"},
+        })
+        for status, body in (
+                (200, json.dumps({"isOpenAccess": False, "openAccessPdf": None})),
+                (404, "not found"),
+                (200, "[]"),
+                (429, "rate limited"),
+                (503, "maintenance")):
+            with self.subTest(status=status, body=body):
+                calls = []
+                responses = [
+                    (200, {}, json.dumps({"is_oa": False})),
+                    (status, {}, body),
+                    (200, {}, openalex),
+                ]
+
+                def fake_http(url, **kwargs):
+                    calls.append(url)
+                    return responses.pop(0)
+
+                with mock.patch.object(server, "http", side_effect=fake_http):
+                    result = server.resolve_oa_pdf("10.1234/fallback")
+                self.assertEqual(result, ("https://open.org/oa.pdf", "openalex"))
+                self.assertEqual(len(calls), 3)
+                self.assertIn("semanticscholar", calls[1])
+                self.assertIn("openalex", calls[2])
+
 
 class ResultBudget(unittest.TestCase):
-    def test_truncation_cap(self):
+    def test_truncation_cap_preserves_parseable_json(self):
         big = {"x": "y" * (server.MAX_TEXT + 1000)}
         with mock.patch.dict(server.HANDLERS, {"library_links": lambda a: big}):
             r = server.handle({"jsonrpc": "2.0", "id": 9, "method": "tools/call",
                                "params": {"name": "library_links"}})
         text = r["result"]["content"][0]["text"]
         self.assertLessEqual(len(text), server.MAX_TEXT + 100)
-        self.assertIn("truncated", text)
+        parsed = json.loads(text)
+        self.assertTrue(parsed["truncated"])
+        self.assertIn("narrow", parsed["hint"])
+        self.assertIsInstance(parsed["preview"], dict)
+        self.assertIn("truncated", parsed["preview"]["x"])
 
 
 class SavedAndCitation(unittest.TestCase):
