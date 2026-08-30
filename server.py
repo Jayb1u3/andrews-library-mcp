@@ -802,7 +802,7 @@ def _download_pdf(url, save_as=None, overwrite=False, referer=None, cookies=None
 
 
 def resolve_oa_pdf(doi):
-    """Legal open-access copy for a DOI via Unpaywall (OpenAlex fallback)."""
+    """Legal OA copy via Unpaywall, Semantic Scholar, then OpenAlex."""
     completed = 0
     try:
         status, _, body = http("https://api.unpaywall.org/v2/{}?email={}".format(
@@ -830,6 +830,28 @@ def resolve_oa_pdf(doi):
                         continue
                     if loc.get("url_for_pdf"):
                         return loc["url_for_pdf"], "unpaywall"
+    except Exception:
+        pass
+    try:
+        status, _, body = http(
+            "https://api.semanticscholar.org/graph/v1/paper/DOI:{}?fields={}".format(
+                urllib.parse.quote(doi, safe=""),
+                urllib.parse.quote("isOpenAccess,openAccessPdf", safe=",")))
+        if status == 404:
+            completed += 1
+        elif status == 200:
+            data = json.loads(body)
+            if not isinstance(data, dict):
+                raise ValueError("malformed Semantic Scholar response")
+            pdf = data.get("openAccessPdf")
+            if pdf is not None and not isinstance(pdf, dict):
+                raise ValueError("malformed Semantic Scholar openAccessPdf")
+            if pdf and isinstance(pdf.get("url"), str) and pdf["url"]:
+                return pdf["url"], "semantic-scholar"
+            if data.get("isOpenAccess") is False:
+                completed += 1
+            elif not isinstance(data.get("isOpenAccess"), bool):
+                raise ValueError("malformed Semantic Scholar OA status")
     except Exception:
         pass
     try:
@@ -1053,7 +1075,8 @@ TOOLS = [
     {"name": "save_work",
      "description": "SAVE research full text locally (to ~/.hermes/andrews-library/"
                     "files/) when a legal automated copy exists: pass `doi` to fetch "
-                    "the open-access copy (Unpaywall/OpenAlex), or `url` for a "
+                    "the open-access copy (Unpaywall/Semantic Scholar/OpenAlex), "
+                    "or `url` for a "
                     "Digital Commons record or any open PDF link. Digital Commons "
                     "PDFs are CDN-gated to browsers: the tool then returns the "
                     "direct pdf_url for a one-click browser save. LICENSED content "

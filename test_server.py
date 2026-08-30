@@ -663,6 +663,56 @@ class SaveWork(unittest.TestCase):
             pdf, src = server.resolve_oa_pdf("10.1/x")
         self.assertEqual((pdf, src), ("https://open.org/a.pdf", "unpaywall"))
 
+    def test_semantic_scholar_fallback_after_unpaywall(self):
+        calls = []
+        responses = [
+            (200, {}, json.dumps({"is_oa": False})),
+            (200, {}, json.dumps({
+                "isOpenAccess": True,
+                "openAccessPdf": {"url": "https://open.org/s2.pdf"},
+            })),
+        ]
+
+        def fake_http(url, **kwargs):
+            calls.append(url)
+            return responses.pop(0)
+
+        with mock.patch.object(server, "http", side_effect=fake_http):
+            result = server.resolve_oa_pdf("10.1234/s2")
+        self.assertEqual(result, ("https://open.org/s2.pdf", "semantic-scholar"))
+        self.assertIn("unpaywall.org", calls[0])
+        self.assertIn("api.semanticscholar.org", calls[1])
+        self.assertIn("DOI:10.1234%2Fs2", calls[1])
+
+    def test_semantic_scholar_negative_responses_fall_through_to_openalex(self):
+        openalex = json.dumps({
+            "open_access": {"is_oa": True, "oa_url": "https://open.org/oa.pdf"},
+        })
+        for status, body in (
+                (200, json.dumps({"isOpenAccess": False, "openAccessPdf": None})),
+                (404, "not found"),
+                (200, "[]"),
+                (429, "rate limited"),
+                (503, "maintenance")):
+            with self.subTest(status=status, body=body):
+                calls = []
+                responses = [
+                    (200, {}, json.dumps({"is_oa": False})),
+                    (status, {}, body),
+                    (200, {}, openalex),
+                ]
+
+                def fake_http(url, **kwargs):
+                    calls.append(url)
+                    return responses.pop(0)
+
+                with mock.patch.object(server, "http", side_effect=fake_http):
+                    result = server.resolve_oa_pdf("10.1234/fallback")
+                self.assertEqual(result, ("https://open.org/oa.pdf", "openalex"))
+                self.assertEqual(len(calls), 3)
+                self.assertIn("semanticscholar", calls[1])
+                self.assertIn("openalex", calls[2])
+
 
 class ResultBudget(unittest.TestCase):
     def test_truncation_cap_preserves_parseable_json(self):

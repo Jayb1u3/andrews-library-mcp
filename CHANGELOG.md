@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented here. The project follows [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+
+- `save_work` now checks Semantic Scholar between Unpaywall and OpenAlex when resolving a DOI to a legal open-access PDF. The credential-free fallback handles positive, negative, not-found, rate-limited, unavailable, and malformed responses without suppressing the remaining resolvers.
+
+### Fixed
+
+- Oversized MCP results are now structurally bounded and remain parseable JSON instead of slicing serialized JSON syntax.
+- Resolver outages and malformed responses no longer become unsupported “no open-access copy exists” claims when no resolver completed successfully.
+- Interrupted PDF downloads remove partial files, flush and `fsync` completed data, and atomically promote the file with `os.replace`.
+- Study-room date ranges now use calendar-day arithmetic and remain correct across daylight-saving transitions.
+
 ## [1.2.1+merge] - 2026-08-26
 
 ### Fixed
