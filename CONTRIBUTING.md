@@ -1,6 +1,6 @@
 # Contributing
 
-Thank you for improving Andrews Library MCP. Contributions must preserve three invariants: **read-only with respect to library state** (the sole local write is `save_work` storing a legally-obtained open-access PDF), **no user credentials**, and **dependency-free local execution**.
+Thank you for improving Andrews Library MCP. Contributions must preserve three invariants: **read-only with respect to library state** (the sole local write is `save_work` storing an open-access PDF), **no user credentials**, and **dependency-free local execution**.
 
 ## Before opening an issue
 
