@@ -6,7 +6,7 @@ A dependency-free Model Context Protocol (MCP) server for the public systems of 
 
 ## What it provides
 
-The server exposes twelve workflow-oriented tools:
+The server exposes fourteen workflow-oriented tools:
 
 | Tool | Use it for |
 |---|---|
@@ -22,6 +22,8 @@ The server exposes twelve workflow-oriented tools:
 | `save_work` | Save open-access full text locally (DOI via Unpaywall, Digital Commons, open PDF links); licensed content gets the browser+Zotero path |
 | `ezproxy_link` | Wrap a publisher URL in Andrews' EZproxy sign-in URL |
 | `library_links` | Retrieve curated links for major library services |
+| `list_saved` | List open-access PDFs previously saved by `save_work` (read-only recall of what you already have) |
+| `citation_export` | Export a catalog record as RIS or BibTeX for Zotero / a bibliography |
 
 The tools never mutate library state and never touch credentials. The one local write is `save_work`, which stores a legally-obtained open-access PDF into `~/.hermes/andrews-library/files/`. All other authenticated actions (booking, EZproxy, ILL) happen only after the user opens a returned URL in their own browser.
 
@@ -83,7 +85,7 @@ Use an absolute interpreter path. On macOS, `/usr/bin/python3` follows the local
 hermes mcp test andrews-library
 ```
 
-A successful test should discover twelve tools. Start a fresh Hermes session or run `/reload-mcp` on a surface that supports it.
+A successful test should discover fourteen tools. Start a fresh Hermes session or run `/reload-mcp` on a surface that supports it.
 
 ### 4. Try a user workflow
 
@@ -101,7 +103,8 @@ The model sees these tools as `mcp__andrews_library__<tool>` when the server key
 2. Use `catalog_item` only with an `instance_id` returned by `catalog_search`; never guess identifiers.
 3. For Digital Commons, use `digitalcommons` with `list_sets=true` to find collections, then harvest using `set` and `days`. For large collections, the tool follows resumption tokens automatically to ensure a complete harvest.
 4. Use `save_work` for legal open-access PDFs. If a record is licensed/gated, the tool will return the sanctioned browser+Zotero path; do not attempt to bypass these refusals.
-5. Use `hours` for opening times and `rooms` for room availability; do not infer one from the other.
+5. `catalog_item` surfaces a `doi` when the record has one — pass it straight to `save_work(doi=...)` to fetch the open-access copy. Use `citation_export` to produce a RIS/BibTeX citation from an `instance_id`; use `list_saved` to recall PDFs already downloaded.
+6. Use `hours` for opening times and `rooms` for room availability; do not infer one from the other.
 6. Use `ezproxy_link` only to construct a browser sign-in link. Never ask a user to give the model an Andrews password or browser cookie.
 7. Treat availability, hours, and room slots as time-sensitive. State when the tool response was obtained and provide the source URL when present.
 8. If a tool returns pagination or a continuation token, disclose that more results exist before deciding the search is exhaustive.

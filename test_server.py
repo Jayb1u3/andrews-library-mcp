@@ -591,6 +591,63 @@ class ResultBudget(unittest.TestCase):
         self.assertIn("truncated", text)
 
 
+class SavedAndCitation(unittest.TestCase):
+    def test_list_saved_empty_dir_is_clean(self):
+        with mock.patch.object(server.Path, "home", return_value=server.Path("/tmp")):
+            out = server.tool_list_saved({})
+        self.assertEqual(out["count"], 0)
+        self.assertIn("No saved files", out["note"])
+
+    def test_list_saved_rejects_bad_detail(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_list_saved({"detail": "verbose"})
+        self.assertIn("concise", str(cm.exception))
+
+    def test_citation_export_rejects_bad_id(self):
+        with self.assertRaises(server.ToolError) as cm:
+            server.tool_citation_export({"instance_id": "nope"})
+        self.assertIn("36-char", str(cm.exception))
+
+    def test_citation_export_rejects_bad_format(self):
+        with mock.patch.object(server, "okapi_get",
+                                return_value={"instances": [{"id": "i", "title": "T"}]}):
+            with self.assertRaises(server.ToolError) as cm:
+                server.tool_citation_export({"instance_id": "a" * 36, "format": "apa"})
+        self.assertIn("ris", str(cm.exception))
+
+    def test_citation_export_ris_and_bibtex(self):
+        inst = {"id": "a" * 36, "title": "Discipleship",
+                "contributors": [{"name": "Dietrich Bonhoeffer"}],
+                "publication": [{"dateOfPublication": "1959", "publisher": "Fortress"}],
+                "isbns": ["9780800697033"]}
+        for fmt in ("ris", "bibtex"):
+            with mock.patch.object(server, "okapi_get",
+                                    return_value={"instances": [inst]}):
+                out = server.tool_citation_export({"instance_id": "a" * 36,
+                                                   "format": fmt})
+            self.assertEqual(out["format"], fmt)
+            cit = out["citation"]
+            self.assertIn("Discipleship", cit)
+            if fmt == "ris":
+                self.assertIn("TY  - BOOK", cit)
+                self.assertIn("AU  - Dietrich Bonhoeffer", cit)
+                self.assertIn("SN  - 9780800697033", cit)
+            else:
+                self.assertIn("@book{", cit)
+                self.assertIn("bonhoeffer1959", cit.split("{", 1)[1].split(",")[0])
+
+    def test_slim_instance_surfaces_doi(self):
+        inst = {"id": "i1", "title": "T",
+                "identifiers": [{"identifierTypeId": "isbn", "value": "1"},
+                                {"identifierTypeId": "DOI", "value": "10.1/abc"}]}
+        out = server.slim_instance(inst)
+        self.assertEqual(out["doi"], "10.1/abc")
+
+    def test_slim_instance_no_doi_when_absent(self):
+        out = server.slim_instance({"id": "i1", "title": "T", "identifiers": []})
+        self.assertNotIn("doi", out)
+
+
 @unittest.skipUnless(os.environ.get("RUN_LIVE") == "1", "set RUN_LIVE=1 for live smokes")
 class LiveSmokes(unittest.TestCase):
     def test_catalog_search_live(self):

@@ -35,7 +35,7 @@ import urllib.parse
 import urllib.request
 
 SERVER_NAME = "andrews-library"
-SERVER_VERSION = "1.2.1"
+SERVER_VERSION = "1.3.0"
 FILES_DIR_NAME = "files"      # under ~/.hermes/andrews-library/
 MAX_DOWNLOAD = 100 * 1024 * 1024
 # Unpaywall's polite pool wants a contact email. Keep it configurable and
@@ -236,6 +236,17 @@ def _http_uris(entries):
 
 def slim_instance(i):
     pub = _first_pub(i)
+    # FOLIO identifiers carry DOI/ISBN/etc.; surface the first DOI so the
+    # model can hand it straight to save_work without reconstructing it.
+    identifiers = i.get("identifiers") or []
+    doi = None
+    if isinstance(identifiers, list):
+        for idn in identifiers:
+            if isinstance(idn, dict) and (idn.get("identifierTypeId") or "").lower() == "doi":
+                val = (idn.get("value") or "").strip()
+                if val:
+                    doi = val
+                    break
     out = {
         "id": i.get("id"),
         "title": i.get("title"),
@@ -247,6 +258,8 @@ def slim_instance(i):
         "isbns": (i.get("isbns") or [])[:3] or None,
         "catalog_url": "{}/instances/{}".format(LOCATE, i.get("id")),
     }
+    if doi:
+        out["doi"] = doi
     return {k: v for k, v in out.items() if v}
 
 
@@ -1036,12 +1049,35 @@ TOOLS = [
                     "link so the user gets full-text access in their browser.",
      "inputSchema": {"type": "object", "properties": {
          "url": {"type": "string"}}, "required": ["url"]}},
-    {"name": "library_links",
-     "description": "Curated map of every key library page: catalog, WorldCat, course "
-                    "reserves, e-journal portal, citation help, room booking, hours, "
-                    "Digital Commons, SDA Periodical Index. Use when unsure where "
-                    "something lives.",
-     "inputSchema": {"type": "object", "properties": {}}},
+    {'name': 'library_links',
+     'description': 'Curated map of every key library page: catalog, WorldCat, course '
+                    'reserves, e-journal portal, citation help, room booking, hours, '
+                    'Digital Commons, SDA Periodical Index. Use when unsure where '
+                    'something lives.',
+     'inputSchema': {'type': 'object', 'properties': {}}},
+    {'name': 'list_saved',
+     'description': 'List open-access PDFs previously saved by save_work into '
+                    '~/.hermes/andrews-library/files/. Read-only: never re-downloads. '
+                    'Use it to recall what you already saved (e.g. before citing or '
+                    'opening a file), or to confirm a save succeeded. Pass '
+                    "detail='full' for size + saved time; default 'concise' lists "
+                    'name + saved date only.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'detail': {'type': 'string', 'enum': ['concise', 'full'],
+                    'description': "concise (default) = name + date; full = + size_bytes"}}}},
+    {'name': 'citation_export',
+     'description': 'Export a catalog record as a citation you can import into Zotero '
+                    'or paste into a bibliography. Pass instance_id from catalog_search '
+                    '/ catalog_item and format=ris (default) or bibtex. Returns the '
+                    'citation text plus the source catalog_url. Use this instead of '
+                    'hand-building a citation from catalog metadata; for articles BY '
+                    'DOI use save_work, not this tool.',
+     'inputSchema': {'type': 'object', 'properties': {
+         'instance_id': {'type': 'string',
+                        'description': '36-char FOLIO instance id from catalog_search'},
+         'format': {'type': 'string', 'enum': ['ris', 'bibtex'],
+                    'description': 'ris (default, Zotero/EndNote) or bibtex'}},
+         'required': ['instance_id']}},
 ]
 
 # Harness strictness contract: every inputSchema declares an explicit
@@ -1049,6 +1085,97 @@ TOOLS = [
 for _t in TOOLS:
     _t["inputSchema"].setdefault("required", [])
     _t["inputSchema"].setdefault("additionalProperties", False)
+
+def _build_citation(rec, fmt):
+    """Render a catalog record as RIS or BibTeX. rec is the slim_instance
+    dict (title, contributors, published, publisher, isbns, doi, catalog_url).
+    fmt is 'ris' or 'bibtex'. ToolError-safe: callers validate instance_id first."""
+    title = (rec.get("title") or "").strip()
+    authors = rec.get("contributors") or []
+    year = (rec.get("published") or "")[:4]
+    publisher = rec.get("publisher") or ""
+    isbns = rec.get("isbns") or []
+    isbn = isbns[0] if isbns else ""
+    doi = rec.get("doi")
+    url = rec.get("catalog_url") or ""
+    if not title:
+        raise ToolError("catalog record has no title to cite")
+    if fmt == "bibtex":
+        # stable-ish citekey: first author surname + year + title token
+        surn = (authors[0].split()[-1] if authors else "anon").lower()
+        token = re.sub(r"[^a-z0-9]", "", title.lower())[:12] or "item"
+        key = "{}{}{}".format(surn, year or "nd", token)
+        lines = ["@book{{{},".format(key),
+                 "  title = {{{}}},".format(title)]
+        if authors:
+            lines.append("  author = {{{}}},".format(" and ".join(authors)))
+        if year:
+            lines.append("  year = {{{}}},".format(year))
+        if publisher:
+            lines.append("  publisher = {{{}}},".format(publisher))
+        if isbn:
+            lines.append("  isbn = {{{}}},".format(isbn))
+        if doi:
+            lines.append("  doi = {{{}}},".format(doi))
+        if url:
+            lines.append("  url = {{{}}},".format(url))
+        lines.append("}")
+        return "\n".join(lines)
+    # RIS (default)
+    out = ["TY  - BOOK", "TI  - {}".format(title)]
+    for a in authors:
+        out.append("AU  - {}".format(a))
+    if year:
+        out.append("PY  - {}".format(year))
+    if publisher:
+        out.append("PB  - {}".format(publisher))
+    for i in isbns:
+        out.append("SN  - {}".format(i))
+    if doi:
+        out.append("DO  - {}".format(doi))
+    if url:
+        out.append("UR  - {}".format(url))
+    out.append("ER  -")
+    return "\n".join(out)
+
+
+def tool_list_saved(args):
+    detail = args.get("detail") or "concise"
+    if detail not in ("concise", "full"):
+        raise ToolError("detail must be 'concise' (default) or 'full'")
+    files_dir = Path.home() / ".hermes" / "andrews-library" / FILES_DIR_NAME
+    if not files_dir.is_dir():
+        return {"count": 0, "files": [],
+                "files_dir": str(files_dir),
+                "note": "No saved files yet — save_work writes here."}
+    items = []
+    for p in sorted(files_dir.iterdir()):
+        if not p.is_file() or p.suffix == ".part":
+            continue
+        entry = {"name": p.name,
+                 "saved": time.strftime("%Y-%m-%d", time.localtime(p.stat().st_mtime))}
+        if detail == "full":
+            entry["size_bytes"] = p.stat().st_size
+        items.append(entry)
+    return {"count": len(items), "files": items, "files_dir": str(files_dir)}
+
+
+def tool_citation_export(args):
+    inst_id = (args.get("instance_id") or "").strip()
+    if not re.fullmatch(r"[0-9a-f-]{36}", inst_id):
+        raise ToolError("instance_id must be the 36-char id from catalog_search")
+    fmt = (args.get("format") or "ris").strip().lower()
+    if fmt not in ("ris", "bibtex"):
+        raise ToolError("format must be 'ris' (default) or 'bibtex'")
+    data = okapi_get("/search/instances",
+                     {"query": "id=={}".format(inst_id), "expandAll": "true", "limit": "1"})
+    if not data.get("instances"):
+        raise ToolError("no instance {} — use an id from catalog_search".format(inst_id))
+    rec = slim_instance(data["instances"][0])
+    citation = _build_citation(rec, fmt)
+    return {"instance_id": inst_id, "format": fmt, "citation": citation,
+            "catalog_url": rec.get("catalog_url")}
+
 
 HANDLERS = {
     "catalog_search": tool_catalog_search,
@@ -1063,6 +1190,8 @@ HANDLERS = {
     "save_work": tool_save_work,
     "ezproxy_link": tool_ezproxy_link,
     "library_links": tool_library_links,
+    "list_saved": tool_list_saved,
+    "citation_export": tool_citation_export,
 }
 
 

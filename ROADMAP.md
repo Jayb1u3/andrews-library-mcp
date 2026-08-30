@@ -4,7 +4,7 @@ This roadmap describes intended direction, not guaranteed dates. Security, read-
 
 ## Current baseline
 
-- Twelve read-only, task-shaped tools (journal lookup added in 1.1.0; save_work added in 1.2.0)
+- Fourteen read-only, task-shaped tools (journal lookup added in 1.1.0; save_work added in 1.2.0; list_saved + citation_export added in 1.3.0)
 - Public catalog, holdings, reserves, hours, rooms, databases, guides, Digital Commons, EZproxy-link, and navigation coverage
 - Pure Python standard-library stdio server
 - Offline tests, protocol smoke gate, and secret/runtime-artifact scan
