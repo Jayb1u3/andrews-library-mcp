@@ -1,6 +1,6 @@
-# Andrews Library MCP
+# Library MCP
 
-A dependency-free Model Context Protocol (MCP) server for the public systems of Andrews University's James White Library. Every source is fully reachable: catalogs, holdings, hours, rooms, databases, guides, a complete and paginated Digital Commons harvest, legal open-access full-text saving, and browser link-outs for licensed content.
+A dependency-free Model Context Protocol (MCP) server for the public systems of AU JW Library. Every source is fully reachable: catalogs, holdings, hours, rooms, databases, guides, a complete and paginated Digital Commons harvest, legal open-access full-text saving, and browser link-outs for licensed content.
 
 > **Community project:** This repository is not an official Andrews University, James White Library, EBSCO, LibCal, LibGuides, Moodle, or Anthology product. Public upstream services may change without notice.
 
